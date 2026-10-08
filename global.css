@@ -1,11 +1,12 @@
-@import "tailwindcss/theme.css" layer(theme);
-@import "tailwindcss/preflight.css" layer(base);
-@import "tailwindcss/utilities.css";
+@import "tailwindcss";
+
+/* Keep your custom classes like .upcoming-card, .sub-card, etc., below this line */
 
 @import "nativewind/theme";
 
 @theme {
     --color-background: #fff9e3;
+    --color-iconback: #F6ECC9;
     --color-foreground: #081126;
     --color-card: #fff8e7;
     --color-muted: #f6eecf;
@@ -126,8 +127,14 @@
         @apply flex-row items-center gap-3;
     }
 
+    .upcoming-icon-container {
+        /* Container: 56x56 size, highly rounded corners, light cream/off-white background, and centers the child */
+        @apply size-14 rounded-2xl bg-iconback items-center justify-center; 
+    }
+
     .upcoming-icon {
-        @apply size-14;
+        /* Image: Smaller than the container (32x32) to naturally create the inner padding */
+        @apply size-8; 
     }
 
     .upcoming-price {
@@ -158,8 +165,14 @@
         @apply min-w-0 flex-1 flex-row items-center gap-3;
     }
 
+    .sub-icon-container {
+        /* Container: highly rounded corners, centers the image, and uses semi-transparent white for the tint */
+        @apply size-16 rounded-2xl bg-white/40 items-center justify-center; 
+    }
+
     .sub-icon {
-        @apply size-16 rounded-lg;
+        /* Image: Sized smaller than the 16 (64px) container to create the inner padding effect */
+        @apply size-10; 
     }
 
     .sub-copy {
