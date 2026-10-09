@@ -2,10 +2,10 @@ import {SplashScreen, Stack, usePathname, useGlobalSearchParams} from "expo-rout
 import '../global.css';
 import {useFonts} from "expo-font";
 import {useEffect, useRef} from "react";
-import { ClerkProvider, useAuth } from '@clerk/expo';
+import { ClerkProvider, useAuth, useUser } from '@clerk/expo';
 import { tokenCache } from '@clerk/expo/token-cache';
-// import { PostHogProvider } from 'posthog-react-native';
-// import { posthog } from '../src/config/posthog';
+import { PostHogProvider } from 'posthog-react-native';
+import { posthog } from '../lib/posthog';
 
 SplashScreen.preventAutoHideAsync();
 
@@ -17,9 +17,44 @@ if (!publishableKey) {
 
 function RootLayoutContent() {
   const { isLoaded: authLoaded } = useAuth();
+  const { user } = useUser();
   const pathname = usePathname();
   const params = useGlobalSearchParams();
   const previousPathname = useRef<string | undefined>(undefined);
+  const previousIdentifiedUserId = useRef<string | undefined>(undefined);
+
+  useEffect(() => {
+    if (!authLoaded) {
+      return;
+    }
+
+    if (!user?.id) {
+      previousIdentifiedUserId.current = undefined;
+      return;
+    }
+
+    if (previousIdentifiedUserId.current === user.id) {
+      return;
+    }
+
+    if (previousIdentifiedUserId.current) {
+      posthog?.reset();
+    }
+
+    const email = user.primaryEmailAddress?.emailAddress ?? user.emailAddresses[0]?.emailAddress;
+    const personProperties: Record<string, string> = {};
+
+    if (email) {
+      personProperties.email = email;
+    }
+
+    if (user.fullName) {
+      personProperties.name = user.fullName;
+    }
+
+    posthog?.identify(user.id, { $set: personProperties });
+    previousIdentifiedUserId.current = user.id;
+  }, [authLoaded, user]);
 
   useEffect(() => {
     if (previousPathname.current !== pathname) {
@@ -63,18 +98,11 @@ function RootLayoutContent() {
 }
 
 export default function RootLayout() {
-  return (
-    // <PostHogProvider
-    //   client={posthog}
-    //   autocapture={{
-    //     captureScreens: false,
-    //     captureTouches: true,
-    //     propsToCapture: ['testID'],
-    //   }}
-    // >
-      <ClerkProvider publishableKey={publishableKey} tokenCache={tokenCache}>
-        <RootLayoutContent />
-      </ClerkProvider>
-    // </PostHogProvider>
+  const app = (
+    <ClerkProvider publishableKey={publishableKey} tokenCache={tokenCache}>
+      <RootLayoutContent />
+    </ClerkProvider>
   );
+
+  return posthog ? <PostHogProvider client={posthog}>{app}</PostHogProvider> : app;
 }

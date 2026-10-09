@@ -4,6 +4,7 @@ import { useSignIn } from '@clerk/expo';
 import { useState } from 'react';
 import { SafeAreaView as RNSafeAreaView } from 'react-native-safe-area-context';
 import { styled } from 'nativewind';
+import { posthog, posthogLog } from '../../lib/posthog';
 
 const SafeAreaView = styled(RNSafeAreaView);
 
@@ -59,6 +60,10 @@ const SignIn = () => {
                     }
                 },
             });
+            posthog?.capture('user_signed_in');
+            posthogLog.info('authentication completed', {
+                auth_flow: 'password_sign_in',
+            });
         } else if (signIn.status === 'needs_second_factor') {
             // Handle MFA if needed (not implemented in this basic flow)
             console.log('MFA required');
@@ -100,6 +105,10 @@ const SignIn = () => {
                         router.replace(url as Href);
                     }
                 },
+            });
+            posthog?.capture('user_signed_in');
+            posthogLog.info('authentication completed', {
+                auth_flow: 'email_code_sign_in',
             });
         } else {
             console.error('Sign-in attempt not complete:', signIn);
@@ -279,7 +288,7 @@ const SignIn = () => {
 
                         {/* Sign-Up Link */}
                         <View className="auth-link-row">
-                            <Text className="auth-link-copy">Don't have an account?</Text>
+                            <Text className="auth-link-copy">Don&apos;t have an account?</Text>
                             <Link href="/(auth)/sign-up" asChild>
                                 <Pressable>
                                     <Text className="auth-link">Create Account</Text>
