@@ -4,7 +4,7 @@ import { useSignUp, useAuth } from '@clerk/expo';
 import { useState } from 'react';
 import { SafeAreaView as RNSafeAreaView } from 'react-native-safe-area-context';
 import { styled } from 'nativewind';
-// import { usePostHog } from 'posthog-react-native';
+import { posthog, posthogLog } from '../../lib/posthog';
 
 const SafeAreaView = styled(RNSafeAreaView);
 
@@ -12,7 +12,6 @@ const SignUp = () => {
     const { signUp, errors, fetchStatus } = useSignUp();
     const { isSignedIn } = useAuth();
     const router = useRouter();
-    // const posthog = usePostHog();
 
     const [emailAddress, setEmailAddress] = useState('');
     const [password, setPassword] = useState('');
@@ -62,12 +61,6 @@ const SignUp = () => {
                         return;
                     }
 
-                    // posthog.identify(emailAddress, {
-                    //     $set: { email: emailAddress },
-                    //     $set_once: { sign_up_date: new Date().toISOString() },
-                    // });
-                    // posthog.capture('user_signed_up', { email: emailAddress });
-
                     const url = decorateUrl('/(tabs)');
                     if (url.startsWith('http')) {
                         // Only use window.location on web platform
@@ -81,6 +74,10 @@ const SignUp = () => {
                         router.replace(url as Href);
                     }
                 },
+            });
+            posthog?.capture('user_signed_up');
+            posthogLog.info('authentication completed', {
+                auth_flow: 'email_sign_up',
             });
         } else {
             console.error('Sign-up attempt not complete:', signUp);
