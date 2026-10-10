@@ -1,11 +1,9 @@
 import { Link } from "expo-router";
-
 import "../../global.css";
 import { Text, View, Image, FlatList, Pressable } from "react-native";
 import { SafeAreaView as RNSafeAreaView } from "react-native-safe-area-context";
 import { styled } from "nativewind";
 import images from "../../constants/images";
-import { HOME_BALANCE, HOME_USER } from "../../constants/data";
 import { formatCurrency } from "../../lib/utils";
 import dayjs from "dayjs";
 import { icons } from "../../constants/icons";
@@ -15,7 +13,7 @@ import SubcriptionCard from "../../components/SubcriptionCard";
 import CreateSubscriptionModal from "../../components/CreateSubscriptionModal";
 import { useState, useMemo } from "react";
 import { useUser } from '@clerk/expo';
-import { posthog, posthogLog } from '../../lib/posthog';
+import { posthogLog } from '../../lib/posthog';
 import { usePostHog } from 'posthog-react-native';
 import { useSubscriptionStore } from "../../lib/subscriptionStore";
 
@@ -28,37 +26,56 @@ export default function App() {
     const [isModalVisible, setIsModalVisible] = useState(false);
     const { subscriptions, addSubscription } = useSubscriptionStore();
 
-    // Get upcoming subscriptions (active subscriptions with renewal date within next 7 days)
+    // 1. Upcoming Subscriptions (Active & renewing within the next 30 days)
     const upcomingSubscriptions = useMemo(() => {
-        const now = dayjs();
-        const nextWeek = now.add(7, 'days');
-        return subscriptions.filter(sub =>
-            sub.status === 'active' &&
-            dayjs(sub.renewalDate).isAfter(now) &&
-            dayjs(sub.renewalDate).isBefore(nextWeek)
-        ).sort((a, b) => dayjs(a.renewalDate).diff(dayjs(b.renewalDate)));
+        const now = dayjs().startOf('day');
+        const nextMonth = now.add(30, 'days');
+        return subscriptions
+            .filter((sub) => {
+                if (sub.status !== 'active' || !sub.renewalDate) return false;
+                const rDate = dayjs(sub.renewalDate);
+                return (rDate.isAfter(now) || rDate.isSame(now, 'day')) && rDate.isBefore(nextMonth);
+            })
+            .sort((a, b) => dayjs(a.renewalDate).diff(dayjs(b.renewalDate)));
     }, [subscriptions]);
 
-    const handleSubscriptionPress = (item: Subscription) => {
-        const isExpanding = expandedSubscriptionId !== item.id;
-        setExpandedSubscriptionId((currentId) => (currentId === item.id ? null : item.id));
-        posthog?.capture(isExpanding ? 'subscription_expanded' : 'subscription_collapsed', {
-            subscription_name: item.name,
-            subscription_id: item.id,
+    // 2. Dynamic Monthly Balance Run-Rate & Next Renewal Date
+    const { monthlySpend, primaryCurrency, nextRenewalDate } = useMemo(() => {
+        if (!subscriptions || subscriptions.length === 0) {
+            return { monthlySpend: 0, primaryCurrency: 'INR', nextRenewalDate: null };
+        }
+
+        let total = 0;
+        let currency = 'INR';
+
+        subscriptions.forEach((sub) => {
+            if (sub.currency) currency = sub.currency;
+            const freq = sub.frequency || sub.billing;
+            if (freq === 'Yearly') total += sub.price / 12;
+            else if (freq === 'Quarterly') total += sub.price / 3;
+            else total += sub.price; // Monthly default
         });
-    };
+
+        const nextDate = upcomingSubscriptions[0]?.renewalDate || null;
+
+        return {
+            monthlySpend: total,
+            primaryCurrency: currency,
+            nextRenewalDate: nextDate,
+        };
+    }, [subscriptions, upcomingSubscriptions]);
 
     const handleCreateSubscription = (newSubscription: Subscription) => {
         addSubscription(newSubscription);
         posthog?.capture('subscription_created', {
             subscription_name: newSubscription.name,
             subscription_price: newSubscription.price,
+            subscription_currency: newSubscription.currency,
             subscription_frequency: newSubscription.frequency,
             subscription_category: newSubscription.category,
         });
     };
 
-    // Get user display name: firstName, fullName, or email
     const displayName = user?.firstName || user?.fullName || user?.emailAddresses[0]?.emailAddress || 'User';
 
     return (
@@ -79,28 +96,38 @@ export default function App() {
                             </Pressable>
                         </View>
 
+                        {/* Real Dynamic Balance Card */}
                         <View className="home-balance-card">
-                            <Text className="home-balance-label">Balance</Text>
+                            <Text className="home-balance-label">Total Monthly Spend</Text>
 
                             <View className="home-balance-row">
                                 <Text className="home-balance-amount">
-                                    {formatCurrency(HOME_BALANCE.amount)}
+                                    {formatCurrency(monthlySpend, primaryCurrency)}
                                 </Text>
                                 <Text className="home-balance-date">
-                                    {dayjs(HOME_BALANCE.nextRenewalDate).format('MM/DD')}
+                                    {nextRenewalDate ? `Next: ${dayjs(nextRenewalDate).format('DD MMM')}` : 'No renewals'}
                                 </Text>
                             </View>
                         </View>
 
+                        {/* Upcoming Horizontal Section */}
                         <View className="mb-5">
-                            <ListHeading title="Upcoming" />
+                            <ListHeading title="Upcoming Renewals" />
                             <FlatList
                                 data={upcomingSubscriptions}
-                                renderItem={({ item }) => (<UpcomingSubcriptionCard {...item} />)}
+                                renderItem={({ item }) => (
+                                    <UpcomingSubcriptionCard
+                                        name={item.name}
+                                        price={item.price}
+                                        currency={item.currency}
+                                        renewalDate={item.renewalDate}
+                                        icon={item.icon}
+                                    />
+                                )}
                                 keyExtractor={(item) => item.id}
                                 horizontal
                                 showsHorizontalScrollIndicator={false}
-                                ListEmptyComponent={<Text className="home-empty-state">No upcoming renewals yet.</Text>}
+                                ListEmptyComponent={<Text className="home-empty-state">No upcoming renewals in the next 30 days.</Text>}
                             />
                         </View>
                         <ListHeading title="All Subscriptions" />
@@ -117,13 +144,10 @@ export default function App() {
                             const isExpanded = expandedSubscriptionId !== item.id;
                             posthog?.capture('subscription_details_toggled', {
                                 subscription_id: item.id,
-                                subscription_status: item.status ?? 'unknown',
-                                billing_interval: item.billing?.toLowerCase() ?? 'monthly',
                                 is_expanded: isExpanded,
                             });
                             posthogLog?.info('subscription details toggled', {
-                                subscription_status: item.status ?? 'unknown',
-                                billing_interval: item.billing?.toLowerCase() ?? 'monthly',
+                                subscription_id: item.id,
                                 is_expanded: isExpanded,
                             });
                             setExpandedSubscriptionId((currentId) => (currentId === item.id ? null : item.id));
@@ -132,7 +156,7 @@ export default function App() {
                 )}
                 extraData={expandedSubscriptionId}
                 ItemSeparatorComponent={() => <View className="h-4" />}
-                ListEmptyComponent={<Text className="home-empty-state">No subcriptions yet.</Text>}
+                ListEmptyComponent={<Text className="home-empty-state">No subscriptions added yet.</Text>}
                 contentContainerClassName="pb-32"
             />
 
