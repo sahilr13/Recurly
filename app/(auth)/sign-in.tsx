@@ -15,6 +15,7 @@ const SignIn = () => {
     const [emailAddress, setEmailAddress] = useState('');
     const [password, setPassword] = useState('');
     const [code, setCode] = useState('');
+    const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
     // Validation states
     const [emailTouched, setEmailTouched] = useState(false);
@@ -28,13 +29,23 @@ const SignIn = () => {
     const handleSubmit = async () => {
         if (!formValid) return;
 
+        setErrorMessage(null);
+
         const { error } = await signIn.password({
             emailAddress,
             password,
         });
 
         if (error) {
-            console.error(JSON.stringify(error, null, 2));
+            // Extract the user-friendly message returned by Clerk
+            const clerkErr = error as any;
+            const message = 
+                clerkErr?.errors?.[0]?.longMessage || 
+                clerkErr?.errors?.[0]?.message || 
+                clerkErr?.message || 
+                'Incorrect email or password. Please try again.';
+            
+            setErrorMessage(message);
             return;
         }
 
@@ -42,17 +53,14 @@ const SignIn = () => {
             await signIn.finalize({
                 navigate: ({ session, decorateUrl }) => {
                     if (session?.currentTask) {
-                        console.log(session?.currentTask);
                         return;
                     }
 
                     const url = decorateUrl('/(tabs)');
                     if (url.startsWith('http')) {
-                        // Only use window.location on web platform
                         if (typeof window !== 'undefined' && window.location) {
                             window.location.href = url;
                         } else {
-                            // On native, just use router navigation
                             router.replace('/(tabs)' as Href);
                         }
                     } else {
@@ -65,10 +73,8 @@ const SignIn = () => {
                 auth_flow: 'password_sign_in',
             });
         } else if (signIn.status === 'needs_second_factor') {
-            // Handle MFA if needed (not implemented in this basic flow)
-            console.log('MFA required');
+            setErrorMessage('Two-factor authentication is required.');
         } else if (signIn.status === 'needs_client_trust') {
-            // Send email code for client trust verification
             const emailCodeFactor = signIn.supportedSecondFactors.find(
                 (factor) => factor.strategy === 'email_code'
             );
@@ -77,41 +83,44 @@ const SignIn = () => {
                 await signIn.mfa.sendEmailCode();
             }
         } else {
-            console.error('Sign-in attempt not complete:', signIn);
+            setErrorMessage('Sign-in attempt not complete. Please try again.');
         }
     };
 
     const handleVerify = async () => {
-        await signIn.mfa.verifyEmailCode({ code });
+        setErrorMessage(null);
+        try {
+            await signIn.mfa.verifyEmailCode({ code });
 
-        if (signIn.status === 'complete') {
-            await signIn.finalize({
-                navigate: ({ session, decorateUrl }) => {
-                    if (session?.currentTask) {
-                        console.log(session?.currentTask);
-                        return;
-                    }
-
-                    const url = decorateUrl('/(tabs)');
-                    if (url.startsWith('http')) {
-                        // Only use window.location on web platform
-                        if (typeof window !== 'undefined' && window.location) {
-                            window.location.href = url;
-                        } else {
-                            // On native, just use router navigation
-                            router.replace('/(tabs)' as Href);
+            if (signIn.status === 'complete') {
+                await signIn.finalize({
+                    navigate: ({ session, decorateUrl }) => {
+                        if (session?.currentTask) {
+                            return;
                         }
-                    } else {
-                        router.replace(url as Href);
-                    }
-                },
-            });
-            posthog?.capture('user_signed_in');
-            posthogLog.info('authentication completed', {
-                auth_flow: 'email_code_sign_in',
-            });
-        } else {
-            console.error('Sign-in attempt not complete:', signIn);
+
+                        const url = decorateUrl('/(tabs)');
+                        if (url.startsWith('http')) {
+                            if (typeof window !== 'undefined' && window.location) {
+                                window.location.href = url;
+                            } else {
+                                router.replace('/(tabs)' as Href);
+                            }
+                        } else {
+                            router.replace(url as Href);
+                        }
+                    },
+                });
+                posthog?.capture('user_signed_in');
+                posthogLog.info('authentication completed', {
+                    auth_flow: 'email_code_sign_in',
+                });
+            } else {
+                setErrorMessage('Verification incomplete. Please check your code.');
+            }
+        } catch (err: any) {
+            const message = err?.errors?.[0]?.longMessage || err?.errors?.[0]?.message || 'Invalid code entered.';
+            setErrorMessage(message);
         }
     };
 
@@ -156,7 +165,10 @@ const SignIn = () => {
                                             value={code}
                                             placeholder="Enter 6-digit code"
                                             placeholderTextColor="rgba(0, 0, 0, 0.4)"
-                                            onChangeText={setCode}
+                                            onChangeText={(text) => {
+                                                setCode(text);
+                                                if (errorMessage) setErrorMessage(null);
+                                            }}
                                             keyboardType="number-pad"
                                             autoComplete="one-time-code"
                                             maxLength={6}
@@ -165,6 +177,12 @@ const SignIn = () => {
                                             <Text className="auth-error">{errors.fields.code.message}</Text>
                                         )}
                                     </View>
+
+                                    {errorMessage && (
+                                        <View className="rounded-xl bg-destructive/10 border border-destructive/20 p-3">
+                                            <Text className="auth-error text-center">{errorMessage}</Text>
+                                        </View>
+                                    )}
 
                                     <Pressable
                                         className={`auth-button ${(!code || fetchStatus === 'fetching') && 'auth-button-disabled'}`}
@@ -241,7 +259,10 @@ const SignIn = () => {
                                         value={emailAddress}
                                         placeholder="name@example.com"
                                         placeholderTextColor="rgba(0, 0, 0, 0.4)"
-                                        onChangeText={setEmailAddress}
+                                        onChangeText={(text) => {
+                                            setEmailAddress(text);
+                                            if (errorMessage) setErrorMessage(null);
+                                        }}
                                         onBlur={() => setEmailTouched(true)}
                                         keyboardType="email-address"
                                         autoComplete="email"
@@ -262,7 +283,10 @@ const SignIn = () => {
                                         placeholder="Enter your password"
                                         placeholderTextColor="rgba(0, 0, 0, 0.4)"
                                         secureTextEntry
-                                        onChangeText={setPassword}
+                                        onChangeText={(text) => {
+                                            setPassword(text);
+                                            if (errorMessage) setErrorMessage(null);
+                                        }}
                                         onBlur={() => setPasswordTouched(true)}
                                         autoComplete="password"
                                     />
@@ -273,6 +297,15 @@ const SignIn = () => {
                                         <Text className="auth-error">{errors.fields.password.message}</Text>
                                     )}
                                 </View>
+
+                                {/* Friendly Error Banner */}
+                                {errorMessage && (
+                                    <View className="rounded-xl bg-destructive/10 border border-destructive/20 p-3">
+                                        <Text className="auth-error text-center font-sans-medium">
+                                            {errorMessage}
+                                        </Text>
+                                    </View>
+                                )}
 
                                 <Pressable
                                     className={`auth-button ${(!formValid || fetchStatus === 'fetching') && 'auth-button-disabled'}`}

@@ -1,44 +1,125 @@
-import { View, Text, ScrollView, Pressable, Image } from 'react-native';
+import { View, Text, ScrollView, Pressable } from 'react-native';
 import { SafeAreaView as RNSafeAreaView } from "react-native-safe-area-context";
 import { styled } from "nativewind";
 import { useRouter } from "expo-router";
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import dayjs from "dayjs";
 import { useSubscriptionStore } from "../../lib/subscriptionStore";
 import { formatCurrency } from "../../lib/utils";
+import SubscriptionIcon from "../../components/SubscriptionIcon";
 
 const SafeAreaView = styled(RNSafeAreaView);
 
-// Fallback pastel palette matching Claude (yellow), Canva (mint), and Grammarly (periwinkle)
+// Card pastel palette matching the screenshot (Claude yellow, Canva mint, Grammarly periwinkle, etc.)
 const CARD_PALETTE = ['#f5c542', '#8fd1bd', '#9bbce6', '#ff9f7a', '#c3b1e1'];
-
-// Bar chart data for the weekly upcoming view
-const WEEK_DATA = [
-  { day: 'Mon', amount: 36, label: '$36' },
-  { day: 'Tue', amount: 30, label: '$30' },
-  { day: 'Wed', amount: 22, label: '$22' },
-  { day: 'Thr', amount: 40, label: '$40', active: true },
-  { day: 'Fri', amount: 34, label: '$34' },
-  { day: 'Sat', amount: 20, label: '$20' },
-  { day: 'Sun', amount: 24, label: '$24' },
-];
 
 const Insights = () => {
   const router = useRouter();
   const { subscriptions } = useSubscriptionStore();
-  const [selectedDayIndex, setSelectedDayIndex] = useState<number>(3); // Default to Thursday
 
-  // Calculate monthly total expenses dynamically from subscriptions
-  const totalMonthlyExpenses = useMemo(() => {
-    if (!subscriptions || subscriptions.length === 0) return 424.63;
-    return subscriptions.reduce((sum, sub) => {
-      const isYearly = sub.frequency === 'Yearly' || sub.billing?.toLowerCase() === 'yearly';
-      const monthly = isYearly ? sub.price / 12 : sub.price;
-      return sum + monthly;
-    }, 0);
+  // 1. Calculate normalized monthly spend, primary currency, and cadence metrics
+  const { totalMonthly, primaryCurrency, frequencyBreakdown } = useMemo(() => {
+    if (!subscriptions || subscriptions.length === 0) {
+      return {
+        totalMonthly: 0,
+        primaryCurrency: 'INR',
+        frequencyBreakdown: { monthly: 0, quarterly: 0, yearly: 0 },
+      };
+    }
+
+    let monthlySum = 0;
+    let currency = 'INR';
+    let monthlyCount = 0;
+    let quarterlyCount = 0;
+    let yearlyCount = 0;
+
+    subscriptions.forEach((sub) => {
+      if (sub.currency) currency = sub.currency;
+
+      const freq = sub.frequency || sub.billing;
+      if (freq === 'Yearly') {
+        monthlySum += sub.price / 12;
+        yearlyCount += 1;
+      } else if (freq === 'Quarterly') {
+        monthlySum += sub.price / 3;
+        quarterlyCount += 1;
+      } else {
+        monthlySum += sub.price;
+        monthlyCount += 1;
+      }
+    });
+
+    return {
+      totalMonthly: monthlySum,
+      primaryCurrency: currency,
+      frequencyBreakdown: {
+        monthly: monthlyCount,
+        quarterly: quarterlyCount,
+        yearly: yearlyCount,
+      },
+    };
   }, [subscriptions]);
 
-  const maxChartValue = 45;
+  // 2. Generate Dynamic 7-Day Week Data based on current week (Mon -> Sun)
+  const { weekChartData, maxChartValue, defaultDayIndex, gridSteps } = useMemo(() => {
+    const today = dayjs().startOf('day');
+    // Dayjs: 0 is Sunday, 1 is Monday... 6 is Saturday
+    const currentDayOfWeek = today.day();
+    const diffToMonday = (currentDayOfWeek + 6) % 7; // 0 for Mon, 1 for Tue, ..., 6 for Sun
+    const monday = today.subtract(diffToMonday, 'day');
+
+    const dayLabels = ['Mon', 'Tue', 'Wed', 'Thr', 'Fri', 'Sat', 'Sun'];
+
+    const chartDays = dayLabels.map((dayLabel, idx) => {
+      const targetDate = monday.add(idx, 'day');
+      const targetDateStr = targetDate.format('YYYY-MM-DD');
+
+      // Sum active renewals due on this specific date
+      const totalForDay = (subscriptions || []).reduce((acc, sub) => {
+        if (sub.status !== 'active' || !sub.renewalDate) return acc;
+        const subDateStr = dayjs(sub.renewalDate).format('YYYY-MM-DD');
+        if (subDateStr === targetDateStr) {
+          return acc + Number(sub.price || 0);
+        }
+        return acc;
+      }, 0);
+
+      return {
+        day: dayLabel,
+        dateStr: targetDateStr,
+        amount: totalForDay,
+        isToday: idx === diffToMonday,
+      };
+    });
+
+    const highestAmount = Math.max(...chartDays.map((d) => d.amount), 0);
+    // Determine dynamic ceiling for Y-axis (or default scale of 50 if all 0)
+    const ceiling = highestAmount > 0 ? Math.ceil(highestAmount * 1.25) : 50;
+
+    // Generate 5 horizontal grid points: ceiling, 75%, 50%, 25%, 0
+    const steps = [
+      ceiling,
+      Math.round(ceiling * 0.75),
+      Math.round(ceiling * 0.5),
+      Math.round(ceiling * 0.25),
+      0,
+    ];
+
+    return {
+      weekChartData: chartDays,
+      maxChartValue: ceiling,
+      defaultDayIndex: diffToMonday,
+      gridSteps: steps,
+    };
+  }, [subscriptions]);
+
+  // State to track which day is selected/highlighted
+  const [selectedDayIndex, setSelectedDayIndex] = useState<number>(defaultDayIndex);
+
+  // Sync selected index whenever the week updates
+  useEffect(() => {
+    setSelectedDayIndex(defaultDayIndex);
+  }, [defaultDayIndex]);
 
   return (
     <SafeAreaView className="flex-1 bg-background">
@@ -46,7 +127,7 @@ const Insights = () => {
         showsVerticalScrollIndicator={false}
         contentContainerStyle={{ paddingHorizontal: 20, paddingTop: 10, paddingBottom: 130 }}
       >
-        {/* Top Navigation Bar */}
+        {/* Navigation Bar */}
         <View className="flex-row items-center justify-between mb-6">
           <Pressable
             onPress={() => (router.canGoBack() ? router.back() : null)}
@@ -70,23 +151,26 @@ const Insights = () => {
           </Pressable>
         </View>
 
-        {/* Custom Weekly Bar Chart Card */}
         <View className="rounded-3xl bg-[#f8edd1] border border-black/5 p-5 mb-5 relative">
           {/* Dashed Horizontal Grid Lines */}
           <View className="h-44 w-full justify-between absolute top-5 left-5 right-5 pointer-events-none">
-            {[45, 35, 25, 5, 0].map((val) => (
+            {gridSteps.map((val) => (
               <View key={val} className="flex-row items-center w-full">
-                <Text className="text-[11px] font-sans-medium text-black/40 w-6">{val}</Text>
-                <View className="flex-1 border-b border-dashed border-black/15 ml-2" />
+                <Text className="text-[11px] font-sans-medium text-black/40 w-7">{val}</Text>
+                <View className="flex-1 border-b border-dashed border-black/15 ml-1" />
               </View>
             ))}
           </View>
 
-          {/* Bars Row */}
+          {/* Bar Columns */}
           <View className="h-44 flex-row items-end pl-8 pr-1 mb-2">
-            {WEEK_DATA.map((item, index) => {
+            {weekChartData.map((item, index) => {
               const isSelected = selectedDayIndex === index;
-              const barHeightPercent = Math.min((item.amount / maxChartValue) * 100, 100);
+              // Bar height calculation: If amount is 0, render a small 4px base indicator
+              const hasAmount = item.amount > 0;
+              const barHeightPercent = hasAmount
+                ? Math.min((item.amount / maxChartValue) * 100, 100)
+                : 0;
 
               return (
                 <Pressable
@@ -98,17 +182,26 @@ const Insights = () => {
                   {isSelected && (
                     <View className="items-center mb-1.5 z-10">
                       <View className="bg-white px-2.5 py-1 rounded-xl shadow-sm border border-black/5">
-                        <Text className="text-xs font-sans-bold text-accent">{item.label}</Text>
+                        <Text className="text-xs font-sans-bold text-accent">
+                          {formatCurrency(item.amount, primaryCurrency)}
+                        </Text>
                       </View>
-                      {/* Triangle Arrow */}
                       <View className="w-0 h-0 border-l-4 border-r-4 border-t-4 border-l-transparent border-r-transparent border-t-white -mt-0.5" />
                     </View>
                   )}
 
-                  {/* Vertical Pill Bar */}
+                  {/* Vertical Bar */}
                   <View
-                    style={{ height: `${barHeightPercent}%` }}
-                    className={`w-3.5 rounded-full ${isSelected ? 'bg-accent' : 'bg-primary'}`}
+                    style={{
+                      height: hasAmount ? `${Math.max(barHeightPercent, 8)}%` : 5,
+                    }}
+                    className={`w-3.5 rounded-full ${
+                      isSelected
+                        ? 'bg-accent'
+                        : hasAmount
+                        ? 'bg-primary'
+                        : 'bg-black/15'
+                    }`}
                   />
                 </Pressable>
               );
@@ -117,11 +210,15 @@ const Insights = () => {
 
           {/* Weekday Labels */}
           <View className="flex-row items-center pl-8 pr-1 mt-2">
-            {WEEK_DATA.map((item, index) => (
+            {weekChartData.map((item, index) => (
               <View key={item.day} className="flex-1 items-center">
                 <Text
-                  className={`text-xs font-sans-medium ${
-                    selectedDayIndex === index ? 'font-sans-bold text-accent' : 'text-muted-foreground'
+                  className={`text-xs ${
+                    selectedDayIndex === index
+                      ? 'font-sans-bold text-accent'
+                      : item.isToday
+                      ? 'font-sans-bold text-primary'
+                      : 'font-sans-medium text-muted-foreground'
                   }`}
                 >
                   {item.day}
@@ -142,13 +239,37 @@ const Insights = () => {
 
           <View className="items-end">
             <Text className="text-2xl font-sans-extrabold text-primary">
-              -{formatCurrency(totalMonthlyExpenses)}
+              -{formatCurrency(totalMonthly, primaryCurrency)}
             </Text>
             <Text className="text-xs font-sans-bold text-muted-foreground mt-1">+12%</Text>
           </View>
         </View>
 
-        {/* Section 3: History List */}
+        {/* Section 3: Billing Cadence Overview */}
+        <View className="bg-card p-4 rounded-3xl border border-border flex-row justify-around mb-6 shadow-sm">
+          <View className="items-center">
+            <Text className="text-2xl font-sans-extrabold text-primary">
+              {frequencyBreakdown.monthly}
+            </Text>
+            <Text className="text-xs font-sans-semibold text-muted-foreground mt-1">Monthly</Text>
+          </View>
+          <View className="w-[1px] bg-border" />
+          <View className="items-center">
+            <Text className="text-2xl font-sans-extrabold text-primary">
+              {frequencyBreakdown.quarterly}
+            </Text>
+            <Text className="text-xs font-sans-semibold text-muted-foreground mt-1">Quarterly</Text>
+          </View>
+          <View className="w-[1px] bg-border" />
+          <View className="items-center">
+            <Text className="text-2xl font-sans-extrabold text-primary">
+              {frequencyBreakdown.yearly}
+            </Text>
+            <Text className="text-xs font-sans-semibold text-muted-foreground mt-1">Yearly</Text>
+          </View>
+        </View>
+
+        {/* Section 4: History List */}
         <View className="list-head">
           <Text className="list-title">History</Text>
           <Pressable className="list-action">
@@ -156,9 +277,8 @@ const Insights = () => {
           </Pressable>
         </View>
 
-        {/* History Subscription Cards */}
         {subscriptions.length === 0 ? (
-          <View className="bg-card p-5 rounded-2xl items-center border border-border">
+          <View className="bg-card p-5 rounded-3xl items-center border border-border">
             <Text className="text-sm font-sans-medium text-muted-foreground">
               No subscription history yet.
             </Text>
@@ -166,9 +286,14 @@ const Insights = () => {
         ) : (
           <View className="gap-3">
             {subscriptions.map((sub, index) => {
-              // Apply the card's category color or cycle through the pastel palette
               const cardBg = sub.color || CARD_PALETTE[index % CARD_PALETTE.length];
               const formattedDate = dayjs(sub.renewalDate || sub.startDate).format('MMMM D, HH:mm');
+              const cadenceLabel =
+                sub.frequency === 'Quarterly'
+                  ? 'quarter'
+                  : sub.frequency === 'Yearly'
+                  ? 'year'
+                  : 'month';
 
               return (
                 <View
@@ -176,35 +301,36 @@ const Insights = () => {
                   style={{ backgroundColor: cardBg }}
                   className="rounded-3xl p-4 flex-row items-center justify-between shadow-sm"
                 >
-                  {/* Left: Icon & Info */}
+                  {/* Left: Dynamic Icon & Information */}
                   <View className="flex-row items-center gap-3.5 flex-1 min-w-0">
-                    <View className="size-14 rounded-2xl bg-white/70 items-center justify-center shrink-0">
-                      {sub.icon ? (
-                        <Image source={sub.icon} className="size-8" resizeMode="contain" />
-                      ) : (
-                        <Text className="text-xl font-sans-extrabold text-primary">
-                          {sub.name.charAt(0).toUpperCase()}
-                        </Text>
-                      )}
-                    </View>
+                    <SubscriptionIcon
+                      name={sub.name}
+                      icon={sub.icon}
+                      color={cardBg}
+                      containerClassName="size-14 rounded-2xl bg-white/70 items-center justify-center shrink-0 overflow-hidden"
+                      iconClassName="size-8"
+                    />
 
                     <View className="flex-1 min-w-0">
                       <Text className="text-lg font-sans-bold text-primary" numberOfLines={1}>
                         {sub.name}
                       </Text>
-                      <Text className="text-sm font-sans-medium text-primary/70 mt-0.5" numberOfLines={1}>
+                      <Text
+                        className="text-sm font-sans-medium text-primary/70 mt-0.5"
+                        numberOfLines={1}
+                      >
                         {formattedDate}
                       </Text>
                     </View>
                   </View>
 
-                  {/* Right: Amount & Cadence */}
+                  {/* Right: Price & Cadence */}
                   <View className="items-end shrink-0 ml-3">
                     <Text className="text-lg font-sans-extrabold text-primary">
-                      {formatCurrency(sub.price)}
+                      {formatCurrency(sub.price, sub.currency)}
                     </Text>
                     <Text className="text-xs font-sans-medium text-primary/70 mt-0.5">
-                      per {sub.frequency?.toLowerCase() === 'yearly' ? 'year' : 'month'}
+                      per {cadenceLabel}
                     </Text>
                   </View>
                 </View>
