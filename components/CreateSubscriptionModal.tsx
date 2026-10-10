@@ -1,13 +1,15 @@
 import { View, Text, Modal, Pressable, TextInput, KeyboardAvoidingView, Platform, ScrollView } from 'react-native';
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import clsx from 'clsx';
 import dayjs from 'dayjs';
+import { Feather } from '@expo/vector-icons';
 import { posthog } from "../lib/posthog";
 
 interface CreateSubscriptionModalProps {
   visible: boolean;
   onClose: () => void;
   onSubmit: (subscription: Subscription) => void;
+  initialData?: Subscription | null;
 }
 
 type Frequency = 'Monthly' | 'Quarterly' | 'Yearly';
@@ -24,18 +26,13 @@ const CATEGORY_COLORS: Record<Category, string> = {
   'Other': '#d4d4d4',
 };
 
-// Rolls forward past start dates cycle-by-cycle until it reaches the next upcoming date
 const calculateUpcomingRenewal = (start: string, freq: Frequency): string => {
   let date = dayjs(start).isValid() ? dayjs(start) : dayjs();
   const today = dayjs().startOf('day');
   const stepMonths = freq === 'Monthly' ? 1 : freq === 'Quarterly' ? 3 : 12;
 
-  // If the date is in the future, that is the renewal
-  if (date.isAfter(today)) {
-    return date.format('YYYY-MM-DD');
-  }
+  if (date.isAfter(today)) return date.format('YYYY-MM-DD');
 
-  // Roll forward until it falls on or after today
   while (date.isBefore(today)) {
     date = date.add(stepMonths, 'month');
   }
@@ -43,17 +40,32 @@ const calculateUpcomingRenewal = (start: string, freq: Frequency): string => {
   return date.format('YYYY-MM-DD');
 };
 
-const CreateSubscriptionModal = ({ visible, onClose, onSubmit }: CreateSubscriptionModalProps) => {
+const CreateSubscriptionModal = ({ visible, onClose, onSubmit, initialData }: CreateSubscriptionModalProps) => {
+  const isEditing = !!initialData;
+
   const [name, setName] = useState('');
   const [price, setPrice] = useState('');
   const [currency, setCurrency] = useState<Currency>('INR');
   const [frequency, setFrequency] = useState<Frequency>('Monthly');
   const [category, setCategory] = useState<Category>('Other');
-
-  // Start Date defaults to today; Renewal Date defaults to the next cycle
   const [startDate, setStartDate] = useState(dayjs().format('YYYY-MM-DD'));
   const [renewalDate, setRenewalDate] = useState(dayjs().add(1, 'month').format('YYYY-MM-DD'));
   const [isManualRenewal, setIsManualRenewal] = useState(false);
+
+  useEffect(() => {
+    if (initialData) {
+      setName(initialData.name);
+      setPrice(String(initialData.price));
+      setCurrency((initialData.currency as Currency) || 'INR');
+      setFrequency((initialData.frequency as Frequency) || 'Monthly');
+      setCategory((initialData.category as Category) || 'Other');
+      setStartDate(initialData.startDate ? dayjs(initialData.startDate).format('YYYY-MM-DD') : dayjs().format('YYYY-MM-DD'));
+      setRenewalDate(initialData.renewalDate ? dayjs(initialData.renewalDate).format('YYYY-MM-DD') : dayjs().add(1, 'month').format('YYYY-MM-DD'));
+      setIsManualRenewal(true);
+    } else {
+      resetForm();
+    }
+  }, [initialData, visible]);
 
   const isValidPrice = () => {
     const trimmed = price.trim();
@@ -67,7 +79,6 @@ const CreateSubscriptionModal = ({ visible, onClose, onSubmit }: CreateSubscript
 
   const handleFrequencyChange = (newFreq: Frequency) => {
     setFrequency(newFreq);
-    // Only auto-recalculate if user hasn't explicitly customized the renewal date
     if (!isManualRenewal) {
       setRenewalDate(calculateUpcomingRenewal(startDate, newFreq));
     }
@@ -75,21 +86,9 @@ const CreateSubscriptionModal = ({ visible, onClose, onSubmit }: CreateSubscript
 
   const handleStartDateChange = (text: string) => {
     setStartDate(text);
-    // If user enters a full valid YYYY-MM-DD and hasn't manually overridden renewal date
     if (!isManualRenewal && text.trim().length === 10 && dayjs(text).isValid()) {
       setRenewalDate(calculateUpcomingRenewal(text, frequency));
     }
-  };
-
-  const handleRenewalDateChange = (text: string) => {
-    setRenewalDate(text);
-    setIsManualRenewal(true);
-  };
-
-  const handleAutoRecalculate = () => {
-    const calculated = calculateUpcomingRenewal(startDate, frequency);
-    setRenewalDate(calculated);
-    setIsManualRenewal(false);
   };
 
   const handleSubmit = () => {
@@ -101,28 +100,26 @@ const CreateSubscriptionModal = ({ visible, onClose, onSubmit }: CreateSubscript
       ? dayjs(renewalDate)
       : dayjs(calculateUpcomingRenewal(startDate, frequency));
 
-    const newSubscription: Subscription = {
-      id: `sub-${Date.now()}`,
+    const subscription: Subscription = {
+      ...(initialData || {}),
+      id: initialData?.id || `sub-${Date.now()}`,
       name: name.trim(),
       price: priceValue,
       currency,
       frequency,
       category,
-      status: 'active',
+      status: initialData?.status || 'active',
       startDate: validStart.toISOString(),
       renewalDate: validRenewal.toISOString(),
       billing: frequency,
       color: CATEGORY_COLORS[category],
     };
 
-    onSubmit(newSubscription);
+    onSubmit(subscription);
 
-    posthog?.capture('subscription_created', {
+    posthog?.capture(isEditing ? 'subscription_updated' : 'subscription_created', {
       subscription_name: name.trim(),
       subscription_price: priceValue,
-      subscription_currency: currency,
-      subscription_frequency: frequency,
-      subscription_category: category,
     });
 
     resetForm();
@@ -149,16 +146,21 @@ const CreateSubscriptionModal = ({ visible, onClose, onSubmit }: CreateSubscript
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={handleClose}>
       <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         className="flex-1"
-        keyboardVerticalOffset={0}
       >
         <Pressable className="modal-overlay" onPress={handleClose}>
-          <Pressable className="modal-container" onPress={(e) => e.stopPropagation()}>
-            <View className="modal-header">
-              <Text className="modal-title">New Subscription</Text>
-              <Pressable className="modal-close" onPress={handleClose}>
-                <Text className="modal-close-text">✕</Text>
+          <Pressable className="modal-container bg-background rounded-t-3xl border-t border-border" onPress={(e) => e.stopPropagation()}>
+            {/* Header */}
+            <View className="flex-row items-center justify-between border-b border-border px-5 py-3.5">
+              <Text className="text-lg font-sans-bold text-primary">
+                {isEditing ? 'Edit Subscription' : 'New Subscription'}
+              </Text>
+              <Pressable 
+                className="size-8 items-center justify-center rounded-full bg-black/5 active:opacity-70" 
+                onPress={handleClose}
+              >
+                <Feather name="x" size={16} color="#081126" />
               </Pressable>
             </View>
 
@@ -166,50 +168,58 @@ const CreateSubscriptionModal = ({ visible, onClose, onSubmit }: CreateSubscript
               className="p-5"
               showsVerticalScrollIndicator={false}
               keyboardShouldPersistTaps="handled"
-              contentContainerStyle={{ gap: 16, paddingBottom: 30 }}
+              contentContainerStyle={{ gap: 14, paddingBottom: 40 }}
             >
               {/* Name */}
-              <View className="auth-field">
-                <Text className="auth-label">Name</Text>
+              <View className="gap-1.5">
+                <Text className="text-xs font-sans-bold text-primary uppercase">Service Name</Text>
                 <TextInput
-                  className="auth-input"
-                  placeholder="e.g. Netflix, Jio Hotstar"
-                  placeholderTextColor="rgba(0, 0, 0, 0.4)"
+                  className="rounded-2xl border border-border bg-card px-4 py-3 text-sm font-sans-medium text-primary"
+                  placeholder="e.g. Netflix, YouTube Premium"
+                  placeholderTextColor="#999"
                   value={name}
                   onChangeText={setName}
                 />
               </View>
 
-              {/* Currency Selector */}
-              <View className="auth-field">
-                <Text className="auth-label">Currency</Text>
-                <View className="picker-row">
+              {/* Currency Picker */}
+              <View className="gap-1.5">
+                <Text className="text-xs font-sans-bold text-primary uppercase">Currency</Text>
+                <View className="flex-row gap-2">
                   <Pressable
-                    className={clsx('picker-option', currency === 'INR' && 'picker-option-active')}
+                    className={clsx(
+                      'flex-1 items-center py-2.5 rounded-xl border',
+                      currency === 'INR' ? 'bg-primary border-primary' : 'bg-card border-border'
+                    )}
                     onPress={() => setCurrency('INR')}
                   >
-                    <Text className={clsx('picker-option-text', currency === 'INR' && 'picker-option-text-active')}>
+                    <Text className={clsx('text-xs font-sans-bold', currency === 'INR' ? 'text-white' : 'text-primary')}>
                       ₹ INR (Rupees)
                     </Text>
                   </Pressable>
                   <Pressable
-                    className={clsx('picker-option', currency === 'USD' && 'picker-option-active')}
+                    className={clsx(
+                      'flex-1 items-center py-2.5 rounded-xl border',
+                      currency === 'USD' ? 'bg-primary border-primary' : 'bg-card border-border'
+                    )}
                     onPress={() => setCurrency('USD')}
                   >
-                    <Text className={clsx('picker-option-text', currency === 'USD' && 'picker-option-text-active')}>
-                      $ USD (Dollars)
+                    <Text className={clsx('text-xs font-sans-bold', currency === 'USD' ? 'text-white' : 'text-primary')}>
+                      $ USD (Dollar)
                     </Text>
                   </Pressable>
                 </View>
               </View>
 
               {/* Price */}
-              <View className="auth-field">
-                <Text className="auth-label">Price ({currency === 'INR' ? '₹' : '$'})</Text>
+              <View className="gap-1.5">
+                <Text className="text-xs font-sans-bold text-primary uppercase">
+                  Price ({currency === 'INR' ? '₹' : '$'})
+                </Text>
                 <TextInput
-                  className="auth-input"
+                  className="rounded-2xl border border-border bg-card px-4 py-3 text-sm font-sans-medium text-primary"
                   placeholder="0.00"
-                  placeholderTextColor="rgba(0, 0, 0, 0.4)"
+                  placeholderTextColor="#999"
                   value={price}
                   onChangeText={setPrice}
                   keyboardType="decimal-pad"
@@ -217,16 +227,19 @@ const CreateSubscriptionModal = ({ visible, onClose, onSubmit }: CreateSubscript
               </View>
 
               {/* Frequency */}
-              <View className="auth-field">
-                <Text className="auth-label">Frequency</Text>
-                <View className="picker-row">
+              <View className="gap-1.5">
+                <Text className="text-xs font-sans-bold text-primary uppercase">Billing Cycle</Text>
+                <View className="flex-row gap-2">
                   {(['Monthly', 'Quarterly', 'Yearly'] as Frequency[]).map((freq) => (
                     <Pressable
                       key={freq}
-                      className={clsx('picker-option', frequency === freq && 'picker-option-active')}
+                      className={clsx(
+                        'flex-1 items-center py-2.5 rounded-xl border',
+                        frequency === freq ? 'bg-primary border-primary' : 'bg-card border-border'
+                      )}
                       onPress={() => handleFrequencyChange(freq)}
                     >
-                      <Text className={clsx('picker-option-text', frequency === freq && 'picker-option-text-active')}>
+                      <Text className={clsx('text-xs font-sans-bold', frequency === freq ? 'text-white' : 'text-primary')}>
                         {freq}
                       </Text>
                     </Pressable>
@@ -234,56 +247,58 @@ const CreateSubscriptionModal = ({ visible, onClose, onSubmit }: CreateSubscript
                 </View>
               </View>
 
-              {/* Date Inputs */}
-              <View className="gap-3">
-                <View className="flex-row gap-3">
-                  {/* Start Date */}
-                  <View className="auth-field flex-1">
-                    <Text className="auth-label">Started On</Text>
-                    <TextInput
-                      className="auth-input"
-                      placeholder="YYYY-MM-DD"
-                      placeholderTextColor="rgba(0, 0, 0, 0.4)"
-                      value={startDate}
-                      onChangeText={handleStartDateChange}
-                    />
-                  </View>
-
-                  {/* Next Renewal Date */}
-                  <View className="auth-field flex-1">
-                    <View className="flex-row items-center justify-between">
-                      <Text className="auth-label">Next Renewal</Text>
-                      {isManualRenewal && (
-                        <Pressable onPress={handleAutoRecalculate}>
-                          <Text className="text-[11px] font-sans-bold text-accent">Reset</Text>
-                        </Pressable>
-                      )}
-                    </View>
-                    <TextInput
-                      className="auth-input"
-                      placeholder="YYYY-MM-DD"
-                      placeholderTextColor="rgba(0, 0, 0, 0.4)"
-                      value={renewalDate}
-                      onChangeText={handleRenewalDateChange}
-                    />
-                  </View>
+              {/* Dates */}
+              <View className="flex-row gap-2.5">
+                <View className="flex-1 gap-1.5">
+                  <Text className="text-xs font-sans-bold text-primary uppercase">Started On</Text>
+                  <TextInput
+                    className="rounded-2xl border border-border bg-card px-4 py-3 text-sm font-sans-medium text-primary"
+                    placeholder="YYYY-MM-DD"
+                    placeholderTextColor="#999"
+                    value={startDate}
+                    onChangeText={handleStartDateChange}
+                  />
                 </View>
-                <Text className="text-xs text-muted-foreground -mt-1">
-                  Tip: Set "Next Renewal" directly to your actual upcoming charge date.
-                </Text>
+
+                <View className="flex-1 gap-1.5">
+                  <View className="flex-row items-center justify-between">
+                    <Text className="text-xs font-sans-bold text-primary uppercase">Next Due</Text>
+                    {isManualRenewal && (
+                      <Pressable onPress={() => {
+                        setRenewalDate(calculateUpcomingRenewal(startDate, frequency));
+                        setIsManualRenewal(false);
+                      }}>
+                        <Text className="text-[10px] font-sans-bold text-accent">Auto-fill</Text>
+                      </Pressable>
+                    )}
+                  </View>
+                  <TextInput
+                    className="rounded-2xl border border-border bg-card px-4 py-3 text-sm font-sans-medium text-primary"
+                    placeholder="YYYY-MM-DD"
+                    placeholderTextColor="#999"
+                    value={renewalDate}
+                    onChangeText={(t) => {
+                      setRenewalDate(t);
+                      setIsManualRenewal(true);
+                    }}
+                  />
+                </View>
               </View>
 
               {/* Category */}
-              <View className="auth-field">
-                <Text className="auth-label">Category</Text>
-                <View className="category-scroll">
+              <View className="gap-1.5">
+                <Text className="text-xs font-sans-bold text-primary uppercase">Category</Text>
+                <View className="flex-row flex-wrap gap-1.5">
                   {CATEGORIES.map((cat) => (
                     <Pressable
                       key={cat}
-                      className={clsx('category-chip', category === cat && 'category-chip-active')}
+                      className={clsx(
+                        'rounded-xl border px-3 py-2',
+                        category === cat ? 'bg-primary border-primary' : 'bg-card border-border'
+                      )}
                       onPress={() => setCategory(cat)}
                     >
-                      <Text className={clsx('category-chip-text', category === cat && 'category-chip-text-active')}>
+                      <Text className={clsx('text-xs font-sans-semibold', category === cat ? 'text-white' : 'text-primary')}>
                         {cat}
                       </Text>
                     </Pressable>
@@ -291,13 +306,17 @@ const CreateSubscriptionModal = ({ visible, onClose, onSubmit }: CreateSubscript
                 </View>
               </View>
 
-              {/* Submit Button */}
               <Pressable
-                className={clsx('auth-button mt-2', !isValidForm && 'auth-button-disabled')}
+                className={clsx(
+                  'mt-2 items-center rounded-2xl bg-accent py-3.5 shadow-xs',
+                  !isValidForm && 'opacity-50'
+                )}
                 onPress={handleSubmit}
                 disabled={!isValidForm}
               >
-                <Text className="auth-button-text">Create Subscription</Text>
+                <Text className="text-sm font-sans-bold text-white">
+                  {isEditing ? 'Save Changes' : 'Create Subscription'}
+                </Text>
               </Pressable>
             </ScrollView>
           </Pressable>
