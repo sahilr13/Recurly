@@ -1,16 +1,19 @@
 {
   "expo": {
-    "name": "Subscription_manage_app",
-    "slug": "Subscription_manage_app",
+    "name": "Recurly",
+    "slug": "Recurly",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
+    "icon": "./assets/icons/logo.png",
     "scheme": "subscriptionmanageapp",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "icon": "./assets/expo.icon"
+      "bundleIdentifier": "com.sahilr.recurrly",
+      "icon": "./assets/expo.icon",
+      "supportsTablet": true
     },
     "android": {
+      "package": "com.sahilr.recurly",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
