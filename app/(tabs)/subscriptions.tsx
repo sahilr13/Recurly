@@ -1,4 +1,4 @@
-import { Text, View, TextInput, FlatList, Pressable, Alert, LayoutAnimation } from 'react-native';
+import { Text, View, TextInput, FlatList, Pressable, LayoutAnimation } from 'react-native';
 import { SafeAreaView as RNSafeAreaView } from "react-native-safe-area-context";
 import { styled } from "nativewind";
 import { useState } from "react";
@@ -7,7 +7,7 @@ import SubcriptionCard from "../../components/SubcriptionCard";
 import CreateSubscriptionModal from "../../components/CreateSubscriptionModal";
 import AnimatedPressable from "../../components/AnimatedPressable";
 import { useSubscriptionStore } from "../../lib/subscriptionStore";
-import { pickAndParseStatement } from "../../lib/statementParser";
+import { importStatementFlow } from "../../lib/importFlow";
 
 const SafeAreaView = styled(RNSafeAreaView);
 
@@ -20,49 +20,11 @@ const Subscriptions = () => {
     const [editingSub, setEditingSub] = useState<Subscription | null>(null);
     const [isEditModalVisible, setIsEditModalVisible] = useState(false);
 
-    const { subscriptions, addSubscriptions, updateSubscription, setStatementSummary } = useSubscriptionStore();
+    const { subscriptions, updateSubscription } = useSubscriptionStore();
 
     const handleTabChange = (tab: FilterTab) => {
         LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
         setFilterTab(tab);
-    };
-
-    const handleImportStatement = async () => {
-        try {
-            const parsed = await pickAndParseStatement();
-            if (!parsed) return;
-
-            setStatementSummary(parsed.summary);
-
-            if (parsed.subscriptions.length === 0) {
-                Alert.alert(
-                    'Statement Analyzed',
-                    `Processed ${parsed.summary.transactionCount} transactions. No repeating subscriptions were identified, but your Bank Health analytics have been updated!`
-                );
-                return;
-            }
-
-            const namesList = parsed.subscriptions
-                .map((s) => `• ${s.name} (${s.currency === 'USD' ? '$' : '₹'}${s.price}/${s.frequency === 'Yearly' ? 'yr' : 'mo'})`)
-                .join('\n');
-
-            Alert.alert(
-                'Statement Analyzed',
-                `Identified ${parsed.subscriptions.length} recurring subscription(s):\n\n${namesList}\n\nAdd them to your dashboard? (Bank health insights have also been updated).`,
-                [
-                    { text: 'Cancel', style: 'cancel' },
-                    {
-                        text: 'Add Subscriptions',
-                        onPress: () => {
-                            LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-                            addSubscriptions(parsed.subscriptions);
-                        },
-                    },
-                ]
-            );
-        } catch (error: any) {
-            Alert.alert('Import Error', error.message || 'Could not parse the statement.');
-        }
     };
 
     const handleSaveEdit = (updated: Subscription) => {
@@ -100,7 +62,7 @@ const Subscriptions = () => {
                             </Text>
                             <AnimatedPressable
                                 scaleTo={0.92}
-                                onPress={handleImportStatement}
+                                onPress={importStatementFlow}
                                 containerClassName="bg-card border border-border px-3.5 py-2 rounded-2xl flex-row items-center gap-1.5 shadow-xs shrink-0"
                             >
                                 <Feather name="upload" size={13} color="#081126" />

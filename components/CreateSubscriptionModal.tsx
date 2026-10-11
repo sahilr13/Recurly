@@ -14,15 +14,16 @@ interface CreateSubscriptionModalProps {
 
 type Frequency = 'Monthly' | 'Quarterly' | 'Yearly';
 type Currency = 'INR' | 'USD';
-type Category = 'Entertainment' | 'AI Tools' | 'Developer Tools' | 'Design' | 'Productivity' | 'Other';
+type Category = 'Entertainment' | 'AI Tools' | 'Developer Tools' | 'Design' | 'Productivity' | 'Bills & Rent' | 'Other';
 
-const CATEGORIES: Category[] = ['Entertainment', 'AI Tools', 'Developer Tools', 'Design', 'Productivity', 'Other'];
+const CATEGORIES: Category[] = ['Entertainment', 'AI Tools', 'Developer Tools', 'Design', 'Productivity', 'Bills & Rent', 'Other'];
 const CATEGORY_COLORS: Record<Category, string> = {
   'Entertainment': '#ff6b6b',
   'AI Tools': '#b8d4e3',
   'Developer Tools': '#e8def8',
   'Design': '#f5c542',
   'Productivity': '#95e1d3',
+  'Bills & Rent': '#f3c9a8',
   'Other': '#d4d4d4',
 };
 
@@ -33,7 +34,8 @@ const calculateUpcomingRenewal = (start: string, freq: Frequency): string => {
 
   if (date.isAfter(today)) return date.format('YYYY-MM-DD');
 
-  while (date.isBefore(today)) {
+  let guard = 0;
+  while (date.isBefore(today) && guard++ < 600) {
     date = date.add(stepMonths, 'month');
   }
 

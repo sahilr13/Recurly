@@ -1,230 +1,152 @@
-import { View, Text, ScrollView, Pressable, LayoutAnimation, Alert } from 'react-native';
-import { SafeAreaView as RNSafeAreaView } from "react-native-safe-area-context";
-import { styled } from "nativewind";
-import { useRouter } from "expo-router";
-import { useMemo, useState } from "react";
-import dayjs from "dayjs";
+import { View, Text, ScrollView, Pressable, LayoutAnimation, Alert, TextInput } from 'react-native';
+import { SafeAreaView as RNSafeAreaView } from 'react-native-safe-area-context';
+import { styled } from 'nativewind';
+import { useRouter } from 'expo-router';
+import { useMemo, useState } from 'react';
+import dayjs from 'dayjs';
 import { Feather } from '@expo/vector-icons';
-import { useSubscriptionStore } from "../../lib/subscriptionStore";
-import { formatCurrency } from "../../lib/utils";
-import AnimatedPressable from "../../components/AnimatedPressable";
-import { pickAndParseStatement } from "../../lib/statementParser";
+import { useSubscriptionStore } from '../../lib/subscriptionStore';
+import { formatCurrency } from '../../lib/utils';
+import AnimatedPressable from '../../components/AnimatedPressable';
+import { importStatementFlow } from '../../lib/importFlow';
+import { computeBankMetrics, TIERS } from '../../lib/analytics';
+import { CATEGORY_COLORS, SPEND_COLORS } from '../../lib/categories';
+import { cycleMonths, dueBetween, isBill, monthlyCost, nextDue, cyclePriceINR } from '../../lib/subMath';
 
 const SafeAreaView = styled(RNSafeAreaView);
 
 type MainTab = 'subscriptions' | 'bank_health';
 
-const CATEGORY_COLORS: Record<string, string> = {
-  'Entertainment': '#ff6b6b',
-  'AI Tools': '#56c2d6',
-  'Developer Tools': '#a78bfa',
-  'Design': '#f5c542',
-  'Productivity': '#8fd1bd',
-  'Other': '#d4d4d4',
-};
+const inr = (n: number) => formatCurrency(n, 'INR');
+
+// Benchmark annual subscription discount rate (e.g., YouTube Premium / typical streaming services: ~16.7% off)
+const ANNUAL_DISCOUNT_RATE = 0.167;
 
 const Insights = () => {
   const router = useRouter();
-  const { subscriptions, statementSummary, setStatementSummary, addSubscriptions } = useSubscriptionStore();
+  const { subscriptions, statementSummary, myNames, addMyName, removeMyName } = useSubscriptionStore();
   const [activeTab, setActiveTab] = useState<MainTab>('subscriptions');
-  const [subscriptionPeriod, setSubscriptionPeriod] = useState<'monthly' | 'yearly'>('monthly');
+  const [period, setPeriod] = useState<'monthly' | 'yearly'>('monthly');
+  const [spendView, setSpendView] = useState<'merchants' | 'people'>('merchants');
+  const [nameInput, setNameInput] = useState('');
+  const [selectedDay, setSelectedDay] = useState(0);
 
   const handleTabSwitch = (tab: MainTab) => {
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     setActiveTab(tab);
   };
 
-  const handleImportStatement = async () => {
-    try {
-      const parsed = await pickAndParseStatement();
-      if (!parsed) return;
-
-      setStatementSummary(parsed.summary);
-      if (parsed.subscriptions.length > 0) {
-        addSubscriptions(parsed.subscriptions);
-      }
-      Alert.alert('Success', 'Bank statement analytics updated successfully!');
-    } catch (err: any) {
-      Alert.alert('Import Failed', err.message || 'Could not parse statement.');
-    }
-  };
-
-  // 1. Subscription Metrics
-  const subMetrics = useMemo(() => {
+  // ---------------- 1. Subscriptions & bills ----------------
+  const sub = useMemo(() => {
     const active = subscriptions.filter((s) => s.status === 'active');
-    let monthlyTotal = 0;
-    let currency = 'INR';
-    let highestSub = active[0] || null;
-    let monthlyCount = 0;
+    const bills = active.filter(isBill);
+    const subs = active.filter((s) => !isBill(s));
+
+    const subsMonthly = subs.reduce((t, s) => t + monthlyCost(s), 0);
+    const billsMonthly = bills.reduce((t, s) => t + monthlyCost(s), 0);
+    const monthlyTotal = subsMonthly + billsMonthly;
+
+    const top = active.reduce<Subscription | null>((best, s) => (!best || monthlyCost(s) > monthlyCost(best) ? s : best), null);
+
+    const today = dayjs().startOf('day');
+    const dueNext7 = dueBetween(active, today, today.add(7, 'day'));
+
+    // Annual-plan savings apply to monthly-billed, non-bill services in standard categories
+    const canSave = subs.filter((s) => cycleMonths(s) === 1 && (s.category || 'Other') !== 'Other');
+    const annualSavings = canSave.reduce((t, s) => t + monthlyCost(s), 0) * ANNUAL_DISCOUNT_RATE * 12;
+
     const catMap: Record<string, number> = {};
-
-    active.forEach((sub) => {
-      if (sub.currency) currency = sub.currency;
-      const freq = sub.frequency || sub.billing;
-      let monthlyCost = sub.price;
-
-      if (freq === 'Yearly') monthlyCost = sub.price / 12;
-      else if (freq === 'Quarterly') monthlyCost = sub.price / 3;
-      else monthlyCount += 1;
-
-      monthlyTotal += monthlyCost;
-
-      if (!highestSub || monthlyCost > (highestSub.price / (highestSub.frequency === 'Yearly' ? 12 : highestSub.frequency === 'Quarterly' ? 3 : 1))) {
-        highestSub = sub;
-      }
-
-      const category = sub.category || 'Other';
-      catMap[category] = (catMap[category] || 0) + monthlyCost;
+    active.forEach((s) => {
+      const c = isBill(s) ? 'Bills & Rent' : s.category || 'Other';
+      catMap[c] = (catMap[c] || 0) + monthlyCost(s);
     });
-
-    const now = dayjs().startOf('day');
-    const weekAhead = now.add(7, 'day');
-    const dueThisWeek = active.reduce((sum, s) => {
-      if (!s.renewalDate) return sum;
-      const r = dayjs(s.renewalDate);
-      return (r.isAfter(now) || r.isSame(now, 'day')) && r.isBefore(weekAhead) ? sum + s.price : sum;
-    }, 0);
-
     const categories = Object.entries(catMap)
       .map(([name, amount]) => ({
         name,
         amount,
-        percentage: monthlyTotal > 0 ? Math.round((amount / monthlyTotal) * 100) : 0,
+        pct: monthlyTotal > 0 ? Math.round((amount / monthlyTotal) * 100) : 0,
         color: CATEGORY_COLORS[name] || '#8fd1bd',
       }))
       .sort((a, b) => b.amount - a.amount);
 
+    // Rolling 7 days starting today (matches "due in next 7 days")
+    const week = Array.from({ length: 7 }, (_, i) => {
+      const day = today.add(i, 'day');
+      const amount = active.reduce((t, s) => {
+        const d = nextDue(s);
+        return d && d.isSame(day, 'day') ? t + cyclePriceINR(s) : t;
+      }, 0);
+      return { label: i === 0 ? 'Today' : day.format('ddd'), amount };
+    });
+    const weekMax = Math.max(...week.map((d) => d.amount), 0);
+
     return {
-      monthlyTotal,
-      annualTotal: monthlyTotal * 12,
-      dailyBurn: monthlyTotal / 30.4,
-      currency,
-      activeCount: active.length,
-      highestSub,
-      dueThisWeek,
-      categories,
-      annualSavingsOpportunity: monthlyCount > 0 ? monthlyTotal * 0.16 * 12 : 0,
+      subsCount: subs.length, billsCount: bills.length, subsMonthly, billsMonthly, monthlyTotal,
+      annualTotal: monthlyTotal * 12, dailyBurn: monthlyTotal / 30.4, top, dueNext7, annualSavings,
+      categories, week, weekMax,
     };
   }, [subscriptions]);
 
-  // 2. Industry-Grade FinHealth Engine
-  const bankMetrics = useMemo(() => {
-    if (!statementSummary) return null;
+  // ---------------- 2. Bank health ----------------
+  const bank = useMemo(
+    () => computeBankMetrics(statementSummary, myNames, sub.monthlyTotal),
+    [statementSummary, myNames, sub.monthlyTotal]
+  );
+  const needsReimport = !!statementSummary && !statementSummary.transactions?.length;
 
-    const totalDebits = statementSummary.totalDebits || 0;
-    const totalCredits = statementSummary.totalCredits || 0;
-    const netCashflow = statementSummary.netCashflow || 0;
+  const markAsMine = (name: string) =>
+    Alert.alert(
+      `Is "${name}" your own account?`,
+      'Money moved to/from it will be left out of income, spending and the score.',
+      [{ text: 'No' , style: 'cancel' }, { text: 'Yes, exclude', onPress: () => addMyName(name) }]
+    );
 
-    // Days span calculation
-    const start = dayjs(statementSummary.startDate);
-    const end = dayjs(statementSummary.endDate);
-    const daysSpan = Math.max(1, end.diff(start, 'day') || 30);
-    const months = daysSpan / 30.4;
-    const monthlyNormalizedDebits = totalDebits / months;
-    const dailyVelocity = totalDebits / daysSpan;
+  const submitName = () => {
+    if (nameInput.trim().length < 3) return;
+    addMyName(nameInput);
+    setNameInput('');
+  };
 
-    // Savings retention rate
-    const savingsRate = totalCredits > 0 ? (netCashflow / totalCredits) * 100 : 0;
+  const observations = useMemo(() => {
+    if (!bank) return [];
+    const list: { tone: 'good' | 'warn' | 'info'; title: string; body: string }[] = [];
 
-    // Recurring Burden Score
-    const burdenPercentage = monthlyNormalizedDebits > 0
-      ? (subMetrics.monthlyTotal / monthlyNormalizedDebits) * 100
-      : 0;
+    if (bank.savingsRate >= 20) list.push({ tone: 'good', title: 'Strong savings', body: `You kept ${bank.savingsRate.toFixed(1)}% of real income (${inr(bank.net)}).` });
+    else if (bank.savingsRate > 0) list.push({ tone: 'info', title: 'Positive, but thin cushion', body: `You kept ${bank.savingsRate.toFixed(1)}% of income (${inr(bank.net)}). Aim for 20%+.` });
+    else list.push({ tone: 'warn', title: 'Spending exceeded income', body: `Outflow was ${inr(Math.abs(bank.net))} more than income in this period.` });
 
-    // FinHealth Composite Scoring Algorithm (0 to 100)
-    let score = 50;
-
-    // Component A: Savings Retention (up to 30 pts)
-    if (savingsRate >= 20) score += 30;
-    else if (savingsRate >= 10) score += 25;
-    else if (savingsRate > 0) score += 18;
-    else score -= 15;
-
-    // Component B: Recurring Fixed Burden (up to 30 pts)
-    if (burdenPercentage <= 5) score += 20;
-    else if (burdenPercentage <= 15) score += 12;
-    else if (burdenPercentage <= 25) score += 5;
-    else score -= 15;
-
-    // Component C: Inflow Consistency & Cushion
-    if (totalCredits > 50000) score += 10;
-
-    const finalScore = Math.min(100, Math.max(15, Math.round(score)));
-
-    let scoreTier = 'Strong Financial Health';
-    let scoreColor = '#16a34a'; // Green
-    let scoreTierShort = 'Strong';
-
-    if (finalScore < 50) {
-      scoreTier = 'Needs Attention';
-      scoreTierShort = 'At Risk';
-      scoreColor = '#dc2626'; // Red
-    } else if (finalScore < 75) {
-      scoreTier = 'Fair Financial Health';
-      scoreTierShort = 'Fair';
-      scoreColor = '#ea7a53'; // Orange
-    } else if (finalScore >= 85) {
-      scoreTier = 'Excellent Financial Health';
-      scoreTierShort = 'Excellent';
-      scoreColor = '#16a34a';
+    const share = bank.commitmentShareOfIncome;
+    if (sub.monthlyTotal > 0 && bank.monthlyIncome > 0) {
+      if (share <= 25) list.push({ tone: 'good', title: 'Low fixed commitments', body: `Subscriptions + bills take ${share.toFixed(0)}% of monthly income.` });
+      else if (share <= 40) list.push({ tone: 'info', title: 'Moderate fixed commitments', body: `Subscriptions + bills take ${share.toFixed(0)}% of monthly income.` });
+      else list.push({ tone: 'warn', title: 'Heavy fixed commitments', body: `Subscriptions + bills take ${share.toFixed(0)}% of monthly income, which limits flexibility.` });
     }
 
-    // Spend distribution for merchants
-    const topMerchantsWithRatio = (statementSummary.topMerchants || []).map((m) => ({
-      ...m,
-      ratio: totalDebits > 0 ? Math.round((m.amount / totalDebits) * 100) : 0,
-    }));
+    if (bank.selfCount > 0) list.push({ tone: 'info', title: 'Own-account transfers excluded', body: `${bank.selfCount} transfers (${inr(bank.selfOut)} out, ${inr(bank.selfIn)} in) were left out of the numbers.` });
+    if (bank.days < 28) list.push({ tone: 'info', title: 'Short statement', body: `Only ${bank.days} days of data, so monthly figures are rough estimates.` });
+    return list;
+  }, [bank, sub.monthlyTotal]);
 
-    return {
-      totalDebits,
-      totalCredits,
-      netCashflow,
-      savingsRate,
-      burdenPercentage,
-      finalScore,
-      scoreTier,
-      scoreTierShort,
-      scoreColor,
-      dailyVelocity,
-      transactionCount: statementSummary.transactionCount,
-      startDate: statementSummary.startDate,
-      endDate: statementSummary.endDate,
-      topMerchants: topMerchantsWithRatio,
-      currency: statementSummary.currency || 'INR',
-    };
-  }, [statementSummary, subMetrics.monthlyTotal]);
+  const shownMerchants = useMemo(() => {
+    if (!bank) return [];
+    return bank.merchants.filter((m) => (spendView === 'people' ? m.isPerson : !m.isPerson)).slice(0, 6);
+  }, [bank, spendView]);
 
-  // Outflow projection (Current week Monday -> Sunday)
-  const { weekChartData, ceilingValue, currentDayIdx } = useMemo(() => {
-    const today = dayjs().startOf('day');
-    const dayOfWeek = today.day();
-    const diffToMonday = (dayOfWeek + 6) % 7;
-    const monday = today.subtract(diffToMonday, 'day');
+  const toneStyle = {
+    good: { bg: 'bg-[#f0f9f4] border-[#8fd1bd]/50', icon: 'check-circle' as const, color: '#16a34a' },
+    warn: { bg: 'bg-[#fff5ea] border-accent/40', icon: 'alert-triangle' as const, color: '#ea7a53' },
+    info: { bg: 'bg-card border-border', icon: 'info' as const, color: '#208aef' },
+  };
 
-    const dayLabels = ['Mon', 'Tue', 'Wed', 'Thr', 'Fri', 'Sat', 'Sun'];
-    const days = dayLabels.map((day, idx) => {
-      const targetDateStr = monday.add(idx, 'day').format('YYYY-MM-DD');
-      const due = subscriptions.reduce((sum, s) => {
-        if (s.status !== 'active' || !s.renewalDate) return sum;
-        return dayjs(s.renewalDate).format('YYYY-MM-DD') === targetDateStr ? sum + s.price : sum;
-      }, 0);
-
-      return {
-        day,
-        amount: due,
-        isToday: idx === diffToMonday,
-      };
-    });
-
-    const max = Math.max(...days.map((d) => d.amount), 0);
-    return {
-      weekChartData: days,
-      ceilingValue: max > 0 ? Math.ceil(max * 1.3) : 50,
-      currentDayIdx: diffToMonday,
-    };
-  }, [subscriptions]);
-
-  const [selectedDay, setSelectedDay] = useState<number>(currentDayIdx);
+  const Segment = ({ tab, icon, label }: { tab: MainTab; icon: any; label: string }) => (
+    <Pressable
+      onPress={() => handleTabSwitch(tab)}
+      className={`flex-1 py-2.5 rounded-xl items-center flex-row justify-center gap-1.5 ${activeTab === tab ? 'bg-primary' : 'bg-transparent'}`}
+    >
+      <Feather name={icon} size={14} color={activeTab === tab ? '#ffffff' : '#081126'} />
+      <Text className={`text-xs font-sans-bold ${activeTab === tab ? 'text-white' : 'text-primary'}`}>{label}</Text>
+    </Pressable>
+  );
 
   return (
     <SafeAreaView className="flex-1 bg-background">
@@ -240,134 +162,76 @@ const Insights = () => {
           >
             <Feather name="arrow-left" size={18} color="#081126" />
           </Pressable>
-
-          <Text className="text-xl font-sans-bold text-primary shrink-1 px-2" numberOfLines={1}>
-            Financial Insights
-          </Text>
-
+          <Text className="text-xl font-sans-bold text-primary shrink-1 px-2" numberOfLines={1}>Financial Insights</Text>
           <Pressable
-            onPress={handleImportStatement}
+            onPress={importStatementFlow}
             className="size-11 rounded-2xl border border-border bg-card items-center justify-center active:opacity-70 shadow-xs shrink-0"
           >
             <Feather name="upload" size={16} color="#081126" />
           </Pressable>
         </View>
 
-        {/* Dual Tab Segmented Control */}
         <View className="flex-row bg-card rounded-2xl p-1 border border-border mb-5 shadow-xs">
-          <Pressable
-            onPress={() => handleTabSwitch('subscriptions')}
-            className={`flex-1 py-2.5 rounded-xl items-center flex-row justify-center gap-1.5 ${
-              activeTab === 'subscriptions' ? 'bg-primary' : 'bg-transparent'
-            }`}
-          >
-            <Feather
-              name="pie-chart"
-              size={14}
-              color={activeTab === 'subscriptions' ? '#ffffff' : '#081126'}
-            />
-            <Text
-              className={`text-xs font-sans-bold ${
-                activeTab === 'subscriptions' ? 'text-white' : 'text-primary'
-              }`}
-            >
-              Subscriptions
-            </Text>
-          </Pressable>
-
-          <Pressable
-            onPress={() => handleTabSwitch('bank_health')}
-            className={`flex-1 py-2.5 rounded-xl items-center flex-row justify-center gap-1.5 ${
-              activeTab === 'bank_health' ? 'bg-primary' : 'bg-transparent'
-            }`}
-          >
-            <Feather
-              name="activity"
-              size={14}
-              color={activeTab === 'bank_health' ? '#ffffff' : '#081126'}
-            />
-            <Text
-              className={`text-xs font-sans-bold ${
-                activeTab === 'bank_health' ? 'text-white' : 'text-primary'
-              }`}
-            >
-              Bank Health
-            </Text>
-          </Pressable>
+          <Segment tab="subscriptions" icon="pie-chart" label="Subscriptions" />
+          <Segment tab="bank_health" icon="activity" label="Bank Health" />
         </View>
 
-        {/* ===================== TAB 1: SUBSCRIPTIONS ===================== */}
+        {/* ===================== TAB 1 ===================== */}
         {activeTab === 'subscriptions' && (
           <View>
-            {/* Hero Spend Card */}
             <View className="bg-primary rounded-3xl p-5 mb-5 shadow-sm">
               <View className="flex-row items-center justify-between mb-2">
                 <Text className="text-xs font-sans-semibold text-white/70 uppercase tracking-wider">
-                  {subscriptionPeriod === 'monthly' ? 'Monthly Commitment' : 'Annual Run-Rate'}
+                  {period === 'monthly' ? 'Monthly Commitment' : 'Annual Run-Rate'}
                 </Text>
-
                 <View className="flex-row bg-white/10 rounded-xl p-0.5 border border-white/10">
-                  <Pressable
-                    onPress={() => setSubscriptionPeriod('monthly')}
-                    className={`px-2.5 py-1 rounded-lg ${subscriptionPeriod === 'monthly' ? 'bg-accent' : 'bg-transparent'}`}
-                  >
-                    <Text className="text-[10px] font-sans-bold text-white">Monthly</Text>
-                  </Pressable>
-                  <Pressable
-                    onPress={() => setSubscriptionPeriod('yearly')}
-                    className={`px-2.5 py-1 rounded-lg ${subscriptionPeriod === 'yearly' ? 'bg-accent' : 'bg-transparent'}`}
-                  >
-                    <Text className="text-[10px] font-sans-bold text-white">Yearly</Text>
-                  </Pressable>
+                  {(['monthly', 'yearly'] as const).map((p) => (
+                    <Pressable key={p} onPress={() => setPeriod(p)} className={`px-2.5 py-1 rounded-lg ${period === p ? 'bg-accent' : 'bg-transparent'}`}>
+                      <Text className="text-[10px] font-sans-bold text-white">{p === 'monthly' ? 'Monthly' : 'Yearly'}</Text>
+                    </Pressable>
+                  ))}
                 </View>
               </View>
 
-              <Text 
-                className="text-3xl sm:text-4xl font-sans-extrabold text-white mt-1"
-                numberOfLines={1}
-                adjustsFontSizeToFit
-              >
-                {formatCurrency(
-                  subscriptionPeriod === 'monthly' ? subMetrics.monthlyTotal : subMetrics.annualTotal,
-                  subMetrics.currency
-                )}
+              <Text className="text-3xl font-sans-extrabold text-white mt-1" numberOfLines={1} adjustsFontSizeToFit>
+                {inr(period === 'monthly' ? sub.monthlyTotal : sub.annualTotal)}
+              </Text>
+
+              <Text className="text-[11px] font-sans-medium text-white/60 mt-1">
+                Subscriptions {inr(period === 'monthly' ? sub.subsMonthly : sub.subsMonthly * 12)} · Bills &amp; rent {inr(period === 'monthly' ? sub.billsMonthly : sub.billsMonthly * 12)}
               </Text>
 
               <View className="flex-row items-center justify-between border-t border-white/15 mt-4 pt-3">
                 <View className="flex-1">
                   <Text className="text-[11px] font-sans-medium text-white/60">Daily Burn Rate</Text>
-                  <Text className="text-sm font-sans-bold text-white mt-0.5" numberOfLines={1}>
-                    {formatCurrency(subMetrics.dailyBurn, subMetrics.currency)}/day
-                  </Text>
+                  <Text className="text-sm font-sans-bold text-white mt-0.5" numberOfLines={1}>{inr(sub.dailyBurn)}/day</Text>
                 </View>
                 <View className="h-7 w-[1px] bg-white/15 mx-3" />
                 <View className="flex-1 items-end">
-                  <Text className="text-[11px] font-sans-medium text-white/60">Active Services</Text>
+                  <Text className="text-[11px] font-sans-medium text-white/60">Active</Text>
                   <Text className="text-sm font-sans-bold text-white mt-0.5">
-                    {subMetrics.activeCount} recurring
+                    {sub.subsCount} subs · {sub.billsCount} bills
                   </Text>
                 </View>
               </View>
             </View>
 
-            {/* Observations */}
             <Text className="text-base font-sans-bold text-primary mb-3">Commitment Insights</Text>
             <View className="gap-2.5 mb-5">
-              {subMetrics.highestSub && (
+              {sub.top && (
                 <View className="bg-card rounded-2xl p-4 border border-border flex-row items-center justify-between shadow-xs">
                   <View className="flex-1 pr-2 min-w-0">
                     <View className="flex-row items-center gap-1.5 mb-0.5">
                       <Feather name="alert-circle" size={13} color="#ea7a53" />
                       <Text className="text-[11px] font-sans-bold text-accent uppercase tracking-wider">Top Commitment</Text>
                     </View>
-                    <Text className="text-base font-sans-bold text-primary" numberOfLines={1}>{subMetrics.highestSub.name}</Text>
-                    <Text className="text-xs font-sans-medium text-muted-foreground mt-0.5">
-                      Largest recurring fixed expense.
-                    </Text>
+                    <Text className="text-base font-sans-bold text-primary" numberOfLines={1}>{sub.top.name}</Text>
+                    <Text className="text-xs font-sans-medium text-muted-foreground mt-0.5">Largest recurring expense per month.</Text>
                   </View>
-                  <Text className="text-base font-sans-extrabold text-primary shrink-0">
-                    {formatCurrency(subMetrics.highestSub.price, subMetrics.highestSub.currency)}
-                  </Text>
+                  <View className="items-end shrink-0">
+                    <Text className="text-base font-sans-extrabold text-primary">{formatCurrency(sub.top.price, sub.top.currency)}</Text>
+                    <Text className="text-[10px] font-sans-medium text-muted-foreground">{sub.top.frequency || sub.top.billing}</Text>
+                  </View>
                 </View>
               )}
 
@@ -375,62 +239,52 @@ const Insights = () => {
                 <View className="flex-1 pr-2 min-w-0">
                   <View className="flex-row items-center gap-1.5 mb-0.5">
                     <Feather name="clock" size={13} color="#081126" />
-                    <Text className="text-[11px] font-sans-bold text-primary/70 uppercase tracking-wider">Due This Week</Text>
+                    <Text className="text-[11px] font-sans-bold text-primary/70 uppercase tracking-wider">Next 7 Days</Text>
                   </View>
                   <Text className="text-base font-sans-bold text-primary">Required Cash Outflow</Text>
-                  <Text className="text-xs font-sans-medium text-muted-foreground mt-0.5">
-                    Liquidity needed for the next 7 days.
-                  </Text>
+                  <Text className="text-xs font-sans-medium text-muted-foreground mt-0.5">Due between today and {dayjs().add(6, 'day').format('ddd D MMM')}.</Text>
                 </View>
-                <Text className="text-base font-sans-extrabold text-accent shrink-0">
-                  {formatCurrency(subMetrics.dueThisWeek, subMetrics.currency)}
-                </Text>
+                <Text className="text-base font-sans-extrabold text-accent shrink-0">{inr(sub.dueNext7)}</Text>
               </View>
 
-              {subMetrics.annualSavingsOpportunity > 0 && (
+              {sub.annualSavings > 0 && (
                 <View className="bg-[#f0f9f4] rounded-2xl p-4 border border-[#8fd1bd]/50 flex-row items-center justify-between shadow-xs">
                   <View className="flex-1 pr-2 min-w-0">
                     <View className="flex-row items-center gap-1.5 mb-0.5">
                       <Feather name="trending-down" size={13} color="#16a34a" />
-                      <Text className="text-[11px] font-sans-bold text-success uppercase tracking-wider">Annual Discount Potential</Text>
+                      <Text className="text-[11px] font-sans-bold text-success uppercase tracking-wider">Annual Plan Saving</Text>
                     </View>
                     <Text className="text-xs font-sans-medium text-primary/80 mt-0.5">
-                      Upgrading monthly plans typically saves ~16%:
+                      Estimate if your monthly services offer yearly plans (~16.7% off). Rent and bills excluded.
                     </Text>
                   </View>
-                  <Text className="text-sm font-sans-extrabold text-success shrink-0">
-                    ~{formatCurrency(subMetrics.annualSavingsOpportunity, subMetrics.currency)}/yr
-                  </Text>
+                  <Text className="text-sm font-sans-extrabold text-success shrink-0">~{inr(sub.annualSavings)}/yr</Text>
                 </View>
               )}
             </View>
 
-            {/* Category Allocation */}
             <View className="mb-5">
               <Text className="text-base font-sans-bold text-primary mb-3">Category Allocation</Text>
-              {subMetrics.categories.length === 0 ? (
+              {sub.categories.length === 0 ? (
                 <View className="bg-card p-5 rounded-2xl border border-border items-center">
                   <Text className="text-xs font-sans-medium text-muted-foreground">No active subscriptions to categorize.</Text>
                 </View>
               ) : (
                 <View className="bg-card rounded-3xl p-4 border border-border gap-3.5 shadow-xs">
                   <View className="h-2.5 w-full bg-black/5 rounded-full overflow-hidden flex-row">
-                    {subMetrics.categories.map((c) => (
-                      <View key={c.name} style={{ width: `${c.percentage}%`, backgroundColor: c.color }} className="h-full" />
+                    {sub.categories.map((c) => (
+                      <View key={c.name} style={{ flex: c.amount, backgroundColor: c.color }} className="h-full" />
                     ))}
                   </View>
-
                   <View className="gap-2">
-                    {subMetrics.categories.map((c) => (
+                    {sub.categories.map((c) => (
                       <View key={c.name} className="flex-row items-center justify-between">
                         <View className="flex-row items-center gap-2 flex-1 pr-2">
                           <View style={{ backgroundColor: c.color }} className="size-2 rounded-full shrink-0" />
-                          <Text className="text-xs font-sans-semibold text-primary truncate" numberOfLines={1}>{c.name}</Text>
-                          <Text className="text-[10px] font-sans-bold text-muted-foreground shrink-0">({c.percentage}%)</Text>
+                          <Text className="text-xs font-sans-semibold text-primary" numberOfLines={1}>{c.name}</Text>
+                          <Text className="text-[10px] font-sans-bold text-muted-foreground shrink-0">({c.pct}%)</Text>
                         </View>
-                        <Text className="text-xs font-sans-bold text-primary shrink-0">
-                          {formatCurrency(c.amount, subMetrics.currency)}/mo
-                        </Text>
+                        <Text className="text-xs font-sans-bold text-primary shrink-0">{inr(c.amount)}/mo</Text>
                       </View>
                     ))}
                   </View>
@@ -438,289 +292,334 @@ const Insights = () => {
               )}
             </View>
 
-            {/* Weekly Outflow Schedule */}
             <View className="mb-4">
-              <Text className="text-base font-sans-bold text-primary mb-3">Weekly Outflow Schedule</Text>
+              <Text className="text-base font-sans-bold text-primary mb-3">Next 7 Days</Text>
               <View className="rounded-3xl bg-[#f8edd1] border border-black/5 p-4 shadow-xs">
-                <View className="h-36 flex-row items-end pl-1 pr-1">
-                  {weekChartData.map((item, idx) => {
-                    const isSelected = selectedDay === idx;
-                    const hasAmount = item.amount > 0;
-                    const barHeight = hasAmount ? Math.min((item.amount / ceilingValue) * 100, 100) : 0;
-
-                    return (
-                      <Pressable
-                        key={item.day}
-                        onPress={() => setSelectedDay(idx)}
-                        className="flex-1 items-center justify-end h-full"
-                      >
-                        {isSelected && (
-                          <View className="items-center mb-1 z-10">
-                            <View className="bg-white px-2 py-0.5 rounded-lg shadow-xs border border-black/5">
-                              <Text className="text-[10px] font-sans-bold text-accent">
-                                {formatCurrency(item.amount, subMetrics.currency)}
-                              </Text>
+                {sub.weekMax === 0 ? (
+                  <View className="h-36 items-center justify-center">
+                    <Feather name="check-circle" size={20} color="#16a34a" />
+                    <Text className="text-xs font-sans-medium text-muted-foreground mt-2">Nothing due in the next 7 days.</Text>
+                  </View>
+                ) : (
+                  <View className="h-36 flex-row items-end">
+                    {sub.week.map((item, idx) => {
+                      const has = item.amount > 0;
+                      const selected = selectedDay === idx;
+                      const h = has ? Math.max(10, Math.min((item.amount / (sub.weekMax * 1.3)) * 100, 100)) : 0;
+                      return (
+                        <Pressable key={idx} onPress={() => setSelectedDay(idx)} className="flex-1 items-center justify-end h-full">
+                          {selected && has && (
+                            <View className="bg-white px-2 py-0.5 rounded-lg border border-black/5 mb-1 z-10">
+                              <Text className="text-[10px] font-sans-bold text-accent" numberOfLines={1}>{inr(item.amount)}</Text>
                             </View>
-                          </View>
-                        )}
-                        <View
-                          style={{ height: hasAmount ? `${Math.max(barHeight, 10)}%` : 5 }}
-                          className={`w-3 rounded-full ${isSelected ? 'bg-accent' : hasAmount ? 'bg-primary' : 'bg-black/15'}`}
-                        />
-                        <Text
-                          className={`text-xs mt-2 ${
-                            isSelected
-                              ? 'font-sans-bold text-accent'
-                              : item.isToday
-                              ? 'font-sans-bold text-primary'
-                              : 'font-sans-medium text-muted-foreground'
-                          }`}
-                        >
-                          {item.day}
-                        </Text>
-                      </Pressable>
-                    );
-                  })}
-                </View>
+                          )}
+                          <View
+                            style={{ height: has ? `${h}%` : 5 }}
+                            className={`w-3 rounded-full ${selected && has ? 'bg-accent' : has ? 'bg-primary' : 'bg-black/15'}`}
+                          />
+                          <Text className={`text-xs mt-2 ${selected ? 'font-sans-bold text-accent' : 'font-sans-medium text-muted-foreground'}`}>{item.label}</Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                )}
               </View>
             </View>
           </View>
         )}
 
-        {/* ===================== TAB 2: BANK HEALTH ===================== */}
+        {/* ===================== TAB 2 ===================== */}
         {activeTab === 'bank_health' && (
           <View>
-            {!bankMetrics ? (
+            {!bank ? (
               <View className="bg-card rounded-3xl p-6 border border-border items-center my-4 shadow-xs">
                 <View className="size-16 rounded-2xl bg-accent/15 items-center justify-center mb-4">
                   <Feather name="file-text" size={28} color="#ea7a53" />
                 </View>
-                <Text className="text-lg font-sans-bold text-primary text-center">No Statement Analyzed Yet</Text>
-                <Text className="text-xs font-sans-medium text-muted-foreground text-center mt-2 mb-6 px-3 leading-5">
-                  Import your bank statement CSV to compute your Financial Health Score, Net Cash Flow, and top merchant expenses.
+                <Text className="text-lg font-sans-bold text-primary text-center">
+                  {needsReimport ? 'Re-import your statement' : 'No Statement Analyzed Yet'}
                 </Text>
-                <AnimatedPressable
-                  onPress={handleImportStatement}
-                  containerClassName="bg-primary px-5 py-3 rounded-2xl flex-row items-center gap-2 shadow-xs"
-                >
+                <Text className="text-xs font-sans-medium text-muted-foreground text-center mt-2 mb-6 px-3 leading-5">
+                  {needsReimport
+                    ? 'Bank Health got a big upgrade (monthly trends, categories, own-account detection). Import the same file again to unlock it.'
+                    : 'Import your bank statement CSV to see your health score, cash flow, spending categories and top payees. Everything stays on this device.'}
+                </Text>
+                <AnimatedPressable onPress={importStatementFlow} containerClassName="bg-primary px-5 py-3 rounded-2xl flex-row items-center gap-2 shadow-xs">
                   <Feather name="upload" size={15} color="#ffffff" />
-                  <Text className="text-xs font-sans-bold text-white">Import Statement CSV</Text>
+                  <Text className="text-xs font-sans-bold text-white">Import Statement</Text>
                 </AnimatedPressable>
               </View>
             ) : (
               <View>
-                {/* 1. Verified Statement Header Tag */}
                 <View className="flex-row items-center justify-between mb-3 px-1">
                   <View className="flex-row items-center gap-1.5 flex-1 min-w-0 pr-2">
                     <Feather name="shield" size={13} color="#16a34a" />
-                    <Text className="text-xs font-sans-bold text-primary truncate" numberOfLines={1}>
-                      State Bank of India • Savings
-                    </Text>
+                    <Text className="text-xs font-sans-bold text-primary" numberOfLines={1}>{statementSummary?.fileName}</Text>
                   </View>
                   <View className="bg-primary/10 px-2.5 py-1 rounded-full shrink-0">
-                    <Text className="text-[10px] font-sans-bold text-primary uppercase">
-                      {bankMetrics.transactionCount} Txns
-                    </Text>
+                    <Text className="text-[10px] font-sans-bold text-primary uppercase">{bank.transactionCount} Txns</Text>
                   </View>
                 </View>
 
-                {/* 2. Industry-Grade Financial Health Score Hero */}
+                {/* Score */}
                 <View className="bg-card rounded-3xl p-5 border border-border mb-4 shadow-xs">
                   <View className="flex-row items-center justify-between mb-2">
-                    <Text className="text-xs font-sans-semibold text-muted-foreground uppercase tracking-wider">
-                      Financial Health Score
-                    </Text>
-                    <View style={{ backgroundColor: `${bankMetrics.scoreColor}15` }} className="px-2.5 py-0.5 rounded-full border border-black/5">
-                      <Text style={{ color: bankMetrics.scoreColor }} className="text-[11px] font-sans-bold uppercase">
-                        {bankMetrics.scoreTierShort}
-                      </Text>
+                    <Text className="text-xs font-sans-semibold text-muted-foreground uppercase tracking-wider">Financial Health Score</Text>
+                    <View style={{ backgroundColor: `${bank.tier.color}15` }} className="px-2.5 py-0.5 rounded-full border border-black/5">
+                      <Text style={{ color: bank.tier.color }} className="text-[11px] font-sans-bold uppercase">{bank.tier.label}</Text>
                     </View>
                   </View>
-
                   <View className="flex-row items-baseline gap-1.5 my-1">
-                    <Text className="text-4xl font-sans-extrabold text-primary">{bankMetrics.finalScore}</Text>
+                    <Text className="text-4xl font-sans-extrabold text-primary">{bank.score}</Text>
                     <Text className="text-base font-sans-bold text-muted-foreground">/ 100</Text>
                   </View>
-
-                  {/* 4-Segment FinTech Health Gauge */}
                   <View className="flex-row gap-1.5 mt-2 mb-2">
-                    <View className="flex-1 h-2 rounded-full bg-[#dc2626]" style={{ opacity: bankMetrics.finalScore < 50 ? 1 : 0.25 }} />
-                    <View className="flex-1 h-2 rounded-full bg-[#ea7a53]" style={{ opacity: bankMetrics.finalScore >= 50 && bankMetrics.finalScore < 75 ? 1 : 0.25 }} />
-                    <View className="flex-1 h-2 rounded-full bg-[#208aef]" style={{ opacity: bankMetrics.finalScore >= 75 && bankMetrics.finalScore < 85 ? 1 : 0.25 }} />
-                    <View className="flex-1 h-2 rounded-full bg-[#16a34a]" style={{ opacity: bankMetrics.finalScore >= 85 ? 1 : 0.25 }} />
+                    {TIERS.map((t) => (
+                      <View key={t.key} style={{ backgroundColor: t.color, opacity: t.key === bank.tier.key ? 1 : 0.25 }} className="flex-1 h-2 rounded-full" />
+                    ))}
                   </View>
-
                   <View className="flex-row justify-between pt-1">
-                    <Text className="text-[10px] font-sans-bold text-muted-foreground">Needs Work</Text>
-                    <Text className="text-[10px] font-sans-bold text-muted-foreground">Fair</Text>
-                    <Text className="text-[10px] font-sans-bold text-muted-foreground">Good</Text>
-                    <Text className="text-[10px] font-sans-bold text-muted-foreground">Excellent</Text>
+                    {TIERS.map((t) => (
+                      <Text key={t.key} className="text-[10px] font-sans-bold text-muted-foreground">{t.label}</Text>
+                    ))}
                   </View>
-
                   <View className="border-t border-border mt-3 pt-3 flex-row items-center justify-between">
-                    <Text className="text-xs font-sans-medium text-muted-foreground">Net Cash Retention</Text>
-                    <Text className="text-xs font-sans-bold text-success">+{bankMetrics.savingsRate.toFixed(1)}% saved</Text>
+                    <Text className="text-xs font-sans-medium text-muted-foreground">Income kept</Text>
+                    <Text className={`text-xs font-sans-bold ${bank.savingsRate >= 0 ? 'text-success' : 'text-destructive'}`}>
+                      {bank.savingsRate >= 0 ? '+' : ''}{bank.savingsRate.toFixed(1)}%
+                    </Text>
                   </View>
+                  <Text className="text-[10px] font-sans-medium text-muted-foreground mt-2 leading-4">
+                    Based on income kept, fixed commitments vs income, and average balance. A personal guide, not a credit score.
+                  </Text>
                 </View>
 
-                {/* 3. Cash Flow Summary (Two-Tone Dynamic Inflow vs Outflow) */}
+                {/* Cash flow */}
                 <View className="bg-primary rounded-3xl p-5 mb-4 shadow-sm">
                   <View className="flex-row items-center justify-between mb-3">
-                    <Text className="text-xs font-sans-semibold text-white/70 uppercase tracking-wider">Cash Flow Dynamics</Text>
+                    <Text className="text-xs font-sans-semibold text-white/70 uppercase tracking-wider">Cash Flow</Text>
                     <Text className="text-[11px] font-sans-medium text-white/60">
-                      {dayjs(bankMetrics.startDate).format('DD MMM')} – {dayjs(bankMetrics.endDate).format('DD MMM')}
+                      {dayjs(bank.startDate).format('DD MMM')} – {dayjs(bank.endDate).format('DD MMM')}
                     </Text>
                   </View>
-
                   <View className="flex-row items-center justify-between mb-3">
                     <View className="flex-1 pr-2">
-                      <Text className="text-[11px] font-sans-medium text-white/60">Total Inflow</Text>
-                      <Text className="text-lg font-sans-bold text-white" numberOfLines={1}>
-                        +{formatCurrency(bankMetrics.totalCredits, bankMetrics.currency)}
-                      </Text>
+                      <Text className="text-[11px] font-sans-medium text-white/60">Income</Text>
+                      <Text className="text-lg font-sans-bold text-white" numberOfLines={1} adjustsFontSizeToFit>+{inr(bank.realIncome)}</Text>
                     </View>
                     <View className="flex-1 items-end pl-2">
-                      <Text className="text-[11px] font-sans-medium text-white/60">Total Outflow</Text>
-                      <Text className="text-lg font-sans-bold text-white/90" numberOfLines={1}>
-                        -{formatCurrency(bankMetrics.totalDebits, bankMetrics.currency)}
-                      </Text>
+                      <Text className="text-[11px] font-sans-medium text-white/60">Spending</Text>
+                      <Text className="text-lg font-sans-bold text-white/90" numberOfLines={1} adjustsFontSizeToFit>-{inr(bank.realSpend)}</Text>
                     </View>
                   </View>
-
-                  {/* Dual Tone Inflow vs Outflow Bar */}
                   <View className="h-2.5 w-full bg-white/20 rounded-full overflow-hidden flex-row">
-                    <View
-                      style={{
-                        width: `${Math.min(95, Math.max(5, (bankMetrics.totalDebits / bankMetrics.totalCredits) * 100))}%`,
-                      }}
-                      className="h-full bg-accent"
-                    />
-                    <View className="flex-1 h-full bg-[#16a34a]" />
+                    <View style={{ flex: Math.max(bank.realSpend, 1) }} className="h-full bg-accent" />
+                    <View style={{ flex: Math.max(bank.net, 0) }} className="h-full bg-[#16a34a]" />
                   </View>
-
                   <View className="flex-row items-center justify-between mt-3 pt-3 border-t border-white/10">
-                    <Text className="text-xs font-sans-medium text-white/70">Net Cash Position</Text>
-                    <Text className={`text-sm font-sans-extrabold ${bankMetrics.netCashflow >= 0 ? 'text-[#8fd1bd]' : 'text-white'}`}>
-                      {bankMetrics.netCashflow >= 0 ? '+' : ''}{formatCurrency(bankMetrics.netCashflow, bankMetrics.currency)}
+                    <Text className="text-xs font-sans-medium text-white/70">Net</Text>
+                    <Text className={`text-sm font-sans-extrabold ${bank.net >= 0 ? 'text-[#8fd1bd]' : 'text-white'}`}>
+                      {bank.net >= 0 ? '+' : '-'}{inr(Math.abs(bank.net))}
                     </Text>
                   </View>
+                  {bank.selfCount > 0 && (
+                    <Text className="text-[10px] font-sans-medium text-white/50 mt-2">
+                      Excludes {inr(bank.selfOut)} out / {inr(bank.selfIn)} in between your own accounts.
+                    </Text>
+                  )}
                 </View>
 
-                {/* 4. Four Financial Vitals (2x2 Grid) */}
+                {/* Monthly trend */}
+                {bank.monthly.length > 1 && (
+                  <View className="mb-5">
+                    <Text className="text-base font-sans-bold text-primary mb-3">Monthly Trend</Text>
+                    <View className="bg-card rounded-3xl p-4 border border-border shadow-xs">
+                      <View className="h-28 flex-row items-end">
+                        {(() => {
+                          const max = Math.max(...bank.monthly.flatMap((m) => [m.income, m.spend]), 1);
+                          return bank.monthly.map((m) => (
+                            <View key={m.key} className="flex-1 items-center justify-end h-full">
+                              <View className="flex-row items-end gap-1 h-full">
+                                <View style={{ height: `${Math.max((m.income / max) * 100, 2)}%` }} className="w-3 rounded-t-md bg-[#16a34a]" />
+                                <View style={{ height: `${Math.max((m.spend / max) * 100, 2)}%` }} className="w-3 rounded-t-md bg-accent" />
+                              </View>
+                            </View>
+                          ));
+                        })()}
+                      </View>
+                      <View className="flex-row mt-2">
+                        {bank.monthly.map((m) => (
+                          <Text key={m.key} className="flex-1 text-center text-[10px] font-sans-bold text-muted-foreground">
+                            {m.label}{m.partial ? '*' : ''}
+                          </Text>
+                        ))}
+                      </View>
+                      <View className="flex-row items-center gap-4 mt-3">
+                        <View className="flex-row items-center gap-1.5"><View className="size-2 rounded-full bg-[#16a34a]" /><Text className="text-[10px] font-sans-medium text-muted-foreground">Income</Text></View>
+                        <View className="flex-row items-center gap-1.5"><View className="size-2 rounded-full bg-accent" /><Text className="text-[10px] font-sans-medium text-muted-foreground">Spending</Text></View>
+                        <Text className="text-[10px] font-sans-medium text-muted-foreground">* partial month</Text>
+                      </View>
+                    </View>
+                  </View>
+                )}
+
+                {/* Vitals */}
                 <Text className="text-base font-sans-bold text-primary mb-3">Key Vitals</Text>
                 <View className="flex-row gap-2.5 mb-2.5">
-                  <View className="flex-1 bg-card rounded-2xl p-3.5 border border-border shadow-xs min-w-0">
-                    <View className="flex-row items-center gap-1.5 mb-1">
-                      <Feather name="arrow-down-left" size={13} color="#16a34a" />
-                      <Text className="text-[10px] font-sans-bold text-muted-foreground uppercase">Credits</Text>
+                  {[
+                    { icon: 'arrow-down-left', color: '#16a34a', label: 'Income / mo', value: inr(bank.monthlyIncome) },
+                    { icon: 'arrow-up-right', color: '#dc2626', label: 'Spend / mo', value: inr(bank.monthlySpend) },
+                  ].map((v) => (
+                    <View key={v.label} className="flex-1 bg-card rounded-2xl p-3.5 border border-border shadow-xs min-w-0">
+                      <View className="flex-row items-center gap-1.5 mb-1">
+                        <Feather name={v.icon as any} size={13} color={v.color} />
+                        <Text className="text-[10px] font-sans-bold text-muted-foreground uppercase">{v.label}</Text>
+                      </View>
+                      <Text className="text-base font-sans-extrabold text-primary" numberOfLines={1} adjustsFontSizeToFit>{v.value}</Text>
                     </View>
-                    <Text className="text-base font-sans-extrabold text-primary" numberOfLines={1} adjustsFontSizeToFit>
-                      {formatCurrency(bankMetrics.totalCredits, bankMetrics.currency)}
-                    </Text>
-                  </View>
-
-                  <View className="flex-1 bg-card rounded-2xl p-3.5 border border-border shadow-xs min-w-0">
-                    <View className="flex-row items-center gap-1.5 mb-1">
-                      <Feather name="arrow-up-right" size={13} color="#dc2626" />
-                      <Text className="text-[10px] font-sans-bold text-muted-foreground uppercase">Debits</Text>
-                    </View>
-                    <Text className="text-base font-sans-extrabold text-primary" numberOfLines={1} adjustsFontSizeToFit>
-                      {formatCurrency(bankMetrics.totalDebits, bankMetrics.currency)}
-                    </Text>
-                  </View>
+                  ))}
                 </View>
-
                 <View className="flex-row gap-2.5 mb-5">
-                  <View className="flex-1 bg-card rounded-2xl p-3.5 border border-border shadow-xs min-w-0">
-                    <View className="flex-row items-center gap-1.5 mb-1">
-                      <Feather name="zap" size={13} color="#ea7a53" />
-                      <Text className="text-[10px] font-sans-bold text-muted-foreground uppercase">Burn Velocity</Text>
+                  {[
+                    { icon: 'zap', color: '#ea7a53', label: 'Daily spend', value: `${inr(bank.dailySpend)}/d` },
+                    { icon: 'pie-chart', color: '#208aef', label: 'Fixed / income', value: `${bank.commitmentShareOfIncome.toFixed(0)}%` },
+                  ].map((v) => (
+                    <View key={v.label} className="flex-1 bg-card rounded-2xl p-3.5 border border-border shadow-xs min-w-0">
+                      <View className="flex-row items-center gap-1.5 mb-1">
+                        <Feather name={v.icon as any} size={13} color={v.color} />
+                        <Text className="text-[10px] font-sans-bold text-muted-foreground uppercase">{v.label}</Text>
+                      </View>
+                      <Text className="text-base font-sans-extrabold text-primary" numberOfLines={1} adjustsFontSizeToFit>{v.value}</Text>
                     </View>
-                    <Text className="text-base font-sans-extrabold text-primary" numberOfLines={1} adjustsFontSizeToFit>
-                      {formatCurrency(bankMetrics.dailyVelocity, bankMetrics.currency)}/d
-                    </Text>
-                  </View>
-
-                  <View className="flex-1 bg-card rounded-2xl p-3.5 border border-border shadow-xs min-w-0">
-                    <View className="flex-row items-center gap-1.5 mb-1">
-                      <Feather name="pie-chart" size={13} color="#208aef" />
-                      <Text className="text-[10px] font-sans-bold text-muted-foreground uppercase">Sub Burden</Text>
-                    </View>
-                    <Text className="text-base font-sans-extrabold text-primary" numberOfLines={1} adjustsFontSizeToFit>
-                      {bankMetrics.burdenPercentage.toFixed(1)}%
-                    </Text>
-                  </View>
+                  ))}
                 </View>
+                {bank.avgBalance !== null && bank.minBalance !== null && (
+                  <View className="bg-card rounded-2xl p-3.5 border border-border shadow-xs mb-5 flex-row justify-between">
+                    <View>
+                      <Text className="text-[10px] font-sans-bold text-muted-foreground uppercase">Avg balance</Text>
+                      <Text className="text-sm font-sans-extrabold text-primary mt-0.5">{inr(bank.avgBalance)}</Text>
+                    </View>
+                    <View className="items-end">
+                      <Text className="text-[10px] font-sans-bold text-muted-foreground uppercase">Lowest balance</Text>
+                      <Text className="text-sm font-sans-extrabold text-primary mt-0.5">{inr(bank.minBalance)}</Text>
+                    </View>
+                  </View>
+                )}
 
-                {/* 5. Top Outflow Recipients / Merchants */}
+                {/* Spending categories */}
+                {bank.categories.length > 0 && (
+                  <View className="mb-5">
+                    <Text className="text-base font-sans-bold text-primary mb-3">Where Money Goes</Text>
+                    <View className="bg-card rounded-3xl p-4 border border-border gap-3 shadow-xs">
+                      {bank.categories.slice(0, 7).map((c) => (
+                        <View key={c.name} className="gap-1.5">
+                          <View className="flex-row items-center justify-between">
+                            <View className="flex-row items-center gap-2 flex-1 pr-2">
+                              <View style={{ backgroundColor: SPEND_COLORS[c.name] || '#d4d4d4' }} className="size-2 rounded-full" />
+                              <Text className="text-xs font-sans-semibold text-primary" numberOfLines={1}>{c.name}</Text>
+                              <Text className="text-[10px] font-sans-bold text-muted-foreground">({c.pct.toFixed(0)}%)</Text>
+                            </View>
+                            <Text className="text-xs font-sans-bold text-primary">{inr(c.amount)}</Text>
+                          </View>
+                          <View className="h-1.5 w-full bg-black/5 rounded-full overflow-hidden">
+                            <View style={{ width: `${Math.max(c.pct, 2)}%`, backgroundColor: SPEND_COLORS[c.name] || '#d4d4d4' }} className="h-full rounded-full" />
+                          </View>
+                        </View>
+                      ))}
+                    </View>
+                  </View>
+                )}
+
+                {/* Top outflow */}
                 <View className="mb-5">
                   <View className="flex-row items-center justify-between mb-3">
-                    <Text className="text-base font-sans-bold text-primary">Top Outflow Merchants</Text>
-                    <Text className="text-[11px] font-sans-semibold text-muted-foreground">By Total Value</Text>
+                    <Text className="text-base font-sans-bold text-primary">Top Outflow</Text>
+                    <View className="flex-row bg-card rounded-xl p-0.5 border border-border">
+                      {(['merchants', 'people'] as const).map((v) => (
+                        <Pressable key={v} onPress={() => setSpendView(v)} className={`px-3 py-1 rounded-lg ${spendView === v ? 'bg-primary' : 'bg-transparent'}`}>
+                          <Text className={`text-[10px] font-sans-bold ${spendView === v ? 'text-white' : 'text-primary'}`}>{v === 'merchants' ? 'Merchants' : 'People'}</Text>
+                        </Pressable>
+                      ))}
+                    </View>
                   </View>
 
                   <View className="bg-card rounded-3xl p-4 border border-border gap-3 shadow-xs">
-                    {bankMetrics.topMerchants.map((merchant, idx) => (
-                      <View key={merchant.name + idx} className="gap-1.5 pb-2 border-b border-black/5 last:border-b-0 last:pb-0">
+                    {shownMerchants.length === 0 && (
+                      <Text className="text-xs font-sans-medium text-muted-foreground text-center py-2">Nothing here yet.</Text>
+                    )}
+                    {shownMerchants.map((m, idx) => (
+                      <Pressable key={m.name} onPress={() => markAsMine(m.name)} className="gap-1.5 active:opacity-70">
                         <View className="flex-row items-center justify-between">
                           <View className="flex-row items-center gap-2 flex-1 pr-2 min-w-0">
                             <View className="size-6 rounded-lg bg-black/5 items-center justify-center shrink-0">
                               <Text className="text-[11px] font-sans-bold text-primary">{idx + 1}</Text>
                             </View>
-                            <Text className="text-xs font-sans-bold text-primary truncate flex-1 min-w-0" numberOfLines={1}>
-                              {merchant.name}
-                            </Text>
-                            <Text className="text-[10px] font-sans-medium text-muted-foreground shrink-0">
-                              {merchant.count} txn{merchant.count > 1 ? 's' : ''}
-                            </Text>
+                            <Text className="text-xs font-sans-bold text-primary flex-1 min-w-0" numberOfLines={1}>{m.name}</Text>
+                            <Text className="text-[10px] font-sans-medium text-muted-foreground shrink-0">{m.count} txn{m.count > 1 ? 's' : ''}</Text>
                           </View>
-
-                          <View className="items-end shrink-0">
-                            <Text className="text-xs font-sans-extrabold text-primary">
-                              {formatCurrency(merchant.amount, bankMetrics.currency)}
-                            </Text>
-                          </View>
+                          <Text className="text-xs font-sans-extrabold text-primary shrink-0">{inr(m.amount)}</Text>
                         </View>
-
-                        {/* Relative Proportion Bar */}
                         <View className="h-1.5 w-full bg-black/5 rounded-full overflow-hidden">
-                          <View
-                            style={{ width: `${Math.min(100, Math.max(3, merchant.ratio))}%` }}
-                            className="h-full bg-primary/70 rounded-full"
-                          />
+                          <View style={{ width: `${Math.max(3, Math.min(100, (m.amount / bank.realSpend) * 100))}%` }} className="h-full bg-primary/70 rounded-full" />
+                        </View>
+                      </Pressable>
+                    ))}
+                    <Text className="text-[10px] font-sans-medium text-muted-foreground">Tap a name to mark it as your own account.</Text>
+                  </View>
+                </View>
+
+                {/* Own accounts */}
+                <View className="mb-5">
+                  <Text className="text-base font-sans-bold text-primary mb-1">My Own Accounts</Text>
+                  <Text className="text-[11px] font-sans-medium text-muted-foreground mb-3 leading-4">
+                    Transfers to/from these names are ignored so they don't inflate income or spending. Short names like "sahil" match anywhere in the payee.
+                  </Text>
+                  <View className="bg-card rounded-3xl p-4 border border-border gap-3 shadow-xs">
+                    <View className="flex-row flex-wrap gap-1.5">
+                      {myNames.length === 0 && <Text className="text-xs font-sans-medium text-muted-foreground">None added yet.</Text>}
+                      {myNames.map((n) => (
+                        <Pressable key={n} onPress={() => removeMyName(n)} className="flex-row items-center gap-1 bg-primary/10 px-2.5 py-1.5 rounded-xl">
+                          <Text className="text-xs font-sans-bold text-primary">{n}</Text>
+                          <Feather name="x" size={11} color="#081126" />
+                        </Pressable>
+                      ))}
+                    </View>
+                    <View className="flex-row items-center gap-2">
+                      <TextInput
+                        className="flex-1 rounded-2xl border border-border bg-background px-3.5 py-2.5 text-xs font-sans-medium text-primary"
+                        placeholder="Add a name, e.g. sahil raul"
+                        placeholderTextColor="#999"
+                        value={nameInput}
+                        onChangeText={setNameInput}
+                        onSubmitEditing={submitName}
+                        returnKeyType="done"
+                      />
+                      <Pressable onPress={submitName} className="px-4 py-2.5 rounded-2xl bg-primary active:opacity-80">
+                        <Text className="text-xs font-sans-bold text-white">Add</Text>
+                      </Pressable>
+                    </View>
+                  </View>
+                </View>
+
+                {/* Observations */}
+                <Text className="text-base font-sans-bold text-primary mb-3">Observations</Text>
+                <View className="gap-2.5 mb-5">
+                  {observations.map((o) => {
+                    const t = toneStyle[o.tone];
+                    return (
+                      <View key={o.title} className={`${t.bg} rounded-2xl p-3.5 border flex-row items-start gap-2.5 shadow-xs`}>
+                        <Feather name={t.icon} size={15} color={t.color} style={{ marginTop: 2 }} />
+                        <View className="flex-1 min-w-0">
+                          <Text className="text-xs font-sans-bold text-primary">{o.title}</Text>
+                          <Text className="text-[11px] font-sans-medium text-primary/80 mt-0.5 leading-4">{o.body}</Text>
                         </View>
                       </View>
-                    ))}
-                  </View>
+                    );
+                  })}
                 </View>
 
-                {/* 6. Strategic Takeaways */}
-                <Text className="text-base font-sans-bold text-primary mb-3">Strategic Observations</Text>
-                <View className="gap-2.5 mb-5">
-                  <View className="bg-[#f0f9f4] rounded-2xl p-3.5 border border-[#8fd1bd]/50 flex-row items-start gap-2.5 shadow-xs">
-                    <Feather name="check-circle" size={15} color="#16a34a" style={{ marginTop: 2 }} />
-                    <View className="flex-1 min-w-0">
-                      <Text className="text-xs font-sans-bold text-primary">Positive Cash Flow Surplus</Text>
-                      <Text className="text-[11px] font-sans-medium text-primary/80 mt-0.5 leading-4">
-                        You retained +{formatCurrency(bankMetrics.netCashflow, bankMetrics.currency)} ({bankMetrics.savingsRate.toFixed(1)}%) of all incoming credits.
-                      </Text>
-                    </View>
-                  </View>
-
-                  <View className="bg-card rounded-2xl p-3.5 border border-border flex-row items-start gap-2.5 shadow-xs">
-                    <Feather name="shield" size={15} color="#208aef" style={{ marginTop: 2 }} />
-                    <View className="flex-1 min-w-0">
-                      <Text className="text-xs font-sans-bold text-primary">Low Fixed Overhead</Text>
-                      <Text className="text-[11px] font-sans-medium text-muted-foreground mt-0.5 leading-4">
-                        Recurring subscriptions represent only {bankMetrics.burdenPercentage.toFixed(1)}% of your monthly debits, providing strong discretionary flexibility.
-                      </Text>
-                    </View>
-                  </View>
-                </View>
-
-                {/* Re-import statement action */}
                 <AnimatedPressable
-                  onPress={handleImportStatement}
+                  onPress={importStatementFlow}
                   containerClassName="bg-white/60 border border-border py-3 rounded-2xl items-center flex-row justify-center gap-1.5 active:opacity-70 shadow-xs mb-4"
                 >
                   <Feather name="refresh-cw" size={13} color="#081126" />
