@@ -8,7 +8,8 @@ import { posthog, posthogLog } from '../../lib/posthog';
 import { useSubscriptionStore } from '../../lib/subscriptionStore';
 import { formatCurrency } from '../../lib/utils';
 import { requestNotificationPermissions, sendInstantTestNotification } from '../../lib/notifications';
-import { pickAndParseStatement } from '../../lib/statementParser';
+import { importStatementFlow } from '../../lib/importFlow';
+import { monthlyCost } from '../../lib/subMath';
 import AnimatedPressable from '../../components/AnimatedPressable';
 import { useMemo } from 'react';
 
@@ -17,19 +18,15 @@ const SafeAreaView = styled(RNSafeAreaView);
 const Settings = () => {
     const { signOut } = useClerk();
     const { user } = useUser();
-    const { subscriptions, statementSummary, setStatementSummary, addSubscriptions, clearSubscriptions } = useSubscriptionStore();
+    const { subscriptions, statementSummary, clearSubscriptions } = useSubscriptionStore();
 
     const stats = useMemo(() => {
         const active = subscriptions.filter((s) => s.status === 'active');
         let monthly = 0;
-        let currency = 'INR';
+        const currency = 'INR';
 
         active.forEach((s) => {
-            if (s.currency) currency = s.currency;
-            const freq = s.frequency || s.billing;
-            if (freq === 'Yearly') monthly += s.price / 12;
-            else if (freq === 'Quarterly') monthly += s.price / 3;
-            else monthly += s.price;
+            monthly += monthlyCost(s);
         });
 
         return {
@@ -42,20 +39,7 @@ const Settings = () => {
         };
     }, [subscriptions]);
 
-    const handleImportStatement = async () => {
-        try {
-            const parsed = await pickAndParseStatement();
-            if (!parsed) return;
-
-            setStatementSummary(parsed.summary);
-            if (parsed.subscriptions.length > 0) {
-                addSubscriptions(parsed.subscriptions);
-            }
-            Alert.alert('Statement Updated', `Processed ${parsed.summary.transactionCount} transactions successfully.`);
-        } catch (error: any) {
-            Alert.alert('Import Failed', error.message || 'Could not parse statement.');
-        }
-    };
+    const handleImportStatement = () => importStatementFlow();
 
     const handleClearData = () => {
         Alert.alert(
@@ -185,7 +169,7 @@ const Settings = () => {
                                 <Feather name="trending-up" size={14} color="#16a34a" />
                             </View>
                             <View>
-                                <Text className="text-xs font-sans-bold text-primary">Monthly Run-Rate</Text>
+                                <Text className="text-xs font-sans-bold text-primary">Monthly Commitments</Text>
                                 <Text className="text-[10px] font-sans-medium text-muted-foreground">
                                     ~{formatCurrency(stats.annualRunRate, stats.currency)}/year
                                 </Text>
@@ -203,11 +187,11 @@ const Settings = () => {
                             </View>
                             <View>
                                 <Text className="text-xs font-sans-bold text-primary">Security Model</Text>
-                                <Text className="text-[10px] font-sans-medium text-muted-foreground">Local AsyncStorage</Text>
+                                <Text className="text-[10px] font-sans-medium text-muted-foreground">Local AsyncStorage (not encrypted)</Text>
                             </View>
                         </View>
                         <View className="bg-success/15 px-2 py-0.5 rounded-full">
-                            <Text className="text-[10px] font-sans-bold text-success uppercase">100% Private</Text>
+                            <Text className="text-[10px] font-sans-bold text-success uppercase">On-device data</Text>
                         </View>
                     </View>
                 </View>

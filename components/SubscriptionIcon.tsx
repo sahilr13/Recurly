@@ -14,19 +14,22 @@ export default function SubscriptionIcon({
   name,
   icon,
   color,
-  containerClassName = 'size-14 rounded-2xl bg-iconback items-center justify-center overflow-hidden',
-  iconClassName = 'size-8',
+  containerClassName = 'size-12 rounded-2xl bg-white/70 items-center justify-center overflow-hidden',
+  iconClassName = 'size-7',
 }: Props) {
   const [hasError, setHasError] = useState(false);
-  const resolvedSource = resolveSubscriptionIcon(name, icon);
+  const resolved = resolveSubscriptionIcon(name, icon);
 
-  if (hasError || !resolvedSource) {
+  // Normalizes string URIs to { uri: ... } objects
+  const imageSource = typeof resolved === 'string' ? { uri: resolved } : resolved;
+
+  if (hasError || !imageSource) {
     return (
       <View
         className={containerClassName}
         style={color ? { backgroundColor: color } : undefined}
       >
-        <Text className="text-base font-sans-extrabold text-primary">
+        <Text className="text-xs font-sans-extrabold text-primary">
           {getInitials(name)}
         </Text>
       </View>
@@ -36,7 +39,7 @@ export default function SubscriptionIcon({
   return (
     <View className={containerClassName}>
       <Image
-        source={resolvedSource}
+        source={imageSource}
         className={iconClassName}
         resizeMode="contain"
         onError={() => setHasError(true)}
