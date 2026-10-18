@@ -9,9 +9,10 @@ import { useSubscriptionStore } from '../../lib/subscriptionStore';
 import { formatCurrency } from '../../lib/utils';
 import { requestNotificationPermissions, sendInstantTestNotification } from '../../lib/notifications';
 import { importStatementFlow } from '../../lib/importFlow';
+import { syncHistoricalBankSms } from '../../lib/smsSync';
 import { monthlyCost } from '../../lib/subMath';
 import AnimatedPressable from '../../components/AnimatedPressable';
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 
 const SafeAreaView = styled(RNSafeAreaView);
 
@@ -19,6 +20,7 @@ const Settings = () => {
     const { signOut } = useClerk();
     const { user } = useUser();
     const { subscriptions, statementSummary, clearSubscriptions } = useSubscriptionStore();
+    const [isSyncingSms, setIsSyncingSms] = useState(false);
 
     const stats = useMemo(() => {
         const active = subscriptions.filter((s) => s.status === 'active');
@@ -41,6 +43,25 @@ const Settings = () => {
 
     const handleImportStatement = () => importStatementFlow();
 
+    const handleSyncSms = async () => {
+        setIsSyncingSms(true);
+        try {
+            const res = await syncHistoricalBankSms(90);
+            if (res.error) {
+                Alert.alert('SMS Diagnostic', res.error);
+            } else {
+                Alert.alert(
+                    'Sync Success',
+                    `Read: ${res.rawCount} SMS\nBank Alerts: ${res.bankCount}\nImported: ${res.count} transactions to Vault.`
+                );
+            }
+        } catch (e: any) {
+            Alert.alert('Error', e?.message || 'Failed to run sync.');
+        } finally {
+            setIsSyncingSms(false);
+        }
+    };
+
     const handleClearData = () => {
         Alert.alert(
             'Reset On-Device Vault',
@@ -62,7 +83,7 @@ const Settings = () => {
     const handleTestNotification = async () => {
         const success = await sendInstantTestNotification();
         if (success) {
-            Alert.alert('Scheduled', 'A test reminder will appear in 2 seconds.');
+            Alert.alert('Notification Test', 'Test reminder triggered.');
         }
     };
 
@@ -121,11 +142,9 @@ const Settings = () => {
                             <View className="size-3.5 rounded-full bg-success border-2 border-card absolute -bottom-0.5 -right-0.5" />
                         </View>
                         <View className="flex-1 min-w-0">
-                            <View className="flex-row items-center gap-1.5">
-                                <Text className="text-base font-sans-bold text-primary truncate" numberOfLines={1}>
-                                    {displayName}
-                                </Text>
-                            </View>
+                            <Text className="text-base font-sans-bold text-primary truncate" numberOfLines={1}>
+                                {displayName}
+                            </Text>
                             {email && (
                                 <Text className="text-xs font-sans-medium text-muted-foreground truncate mt-0.5" numberOfLines={1}>
                                     {email}
@@ -187,31 +206,58 @@ const Settings = () => {
                             </View>
                             <View>
                                 <Text className="text-xs font-sans-bold text-primary">Security Model</Text>
-                                <Text className="text-[10px] font-sans-medium text-muted-foreground">Local AsyncStorage (not encrypted)</Text>
+                                <Text className="text-[10px] font-sans-medium text-muted-foreground">Local Sandboxed Storage</Text>
                             </View>
                         </View>
                         <View className="bg-success/15 px-2 py-0.5 rounded-full">
-                            <Text className="text-[10px] font-sans-bold text-success uppercase">On-device data</Text>
+                            <Text className="text-[10px] font-sans-bold text-success uppercase">100% On-Device</Text>
                         </View>
                     </View>
                 </View>
 
-                {/* 3. Statement & Automation Engine */}
+                {/* 3. Financial Feeds (SMS Sync + Statement Import) */}
                 <Text className="text-sm font-sans-bold text-primary uppercase tracking-wider mb-2.5 px-1">
                     Financial Feeds
                 </Text>
                 <View className="bg-card rounded-3xl p-4 border border-border mb-4 shadow-xs gap-3">
+                    {/* Bank SMS Sync */}
                     <View className="flex-row items-center justify-between">
+                        <View className="flex-row items-center gap-2.5 flex-1 pr-2">
+                            <View className="size-8 rounded-xl bg-primary/10 items-center justify-center">
+                                <Feather name="message-square" size={14} color="#208AEF" />
+                            </View>
+                            <View className="flex-1 min-w-0">
+                                <Text className="text-xs font-sans-bold text-primary">Bank SMS Sync</Text>
+                                <Text className="text-[10px] font-sans-medium text-muted-foreground truncate" numberOfLines={1}>
+                                    SBI, HDFC, ICICI, Axis & UPI alerts
+                                </Text>
+                            </View>
+                        </View>
+
+                        <AnimatedPressable
+                            scaleTo={0.92}
+                            onPress={handleSyncSms}
+                            disabled={isSyncingSms}
+                            containerClassName="bg-primary/10 px-3 py-1.5 rounded-xl shrink-0"
+                        >
+                            <Text className="text-xs font-sans-bold text-primary">
+                                {isSyncingSms ? 'Syncing...' : 'Sync Inbox'}
+                            </Text>
+                        </AnimatedPressable>
+                    </View>
+
+                    {/* Bank Statement CSV/XLSX */}
+                    <View className="pt-3 border-t border-black/5 flex-row items-center justify-between">
                         <View className="flex-row items-center gap-2.5 flex-1 pr-2">
                             <View className="size-8 rounded-xl bg-[#208aef]/15 items-center justify-center">
                                 <Feather name="file-text" size={14} color="#208aef" />
                             </View>
                             <View className="flex-1 min-w-0">
-                                <Text className="text-xs font-sans-bold text-primary">Bank Statement Sync</Text>
+                                <Text className="text-xs font-sans-bold text-primary">Bank Statement File</Text>
                                 <Text className="text-[10px] font-sans-medium text-muted-foreground truncate" numberOfLines={1}>
                                     {statementSummary 
                                         ? `${statementSummary.fileName} (${statementSummary.transactionCount} txns)`
-                                        : 'No statement imported yet'}
+                                        : 'Import CSV or Excel statement'}
                                 </Text>
                             </View>
                         </View>
@@ -227,6 +273,7 @@ const Settings = () => {
                         </AnimatedPressable>
                     </View>
 
+                    {/* Renewal Notifications */}
                     <View className="pt-3 border-t border-black/5 flex-row items-center justify-between">
                         <View className="flex-row items-center gap-2.5 flex-1 pr-2">
                             <View className="size-8 rounded-xl bg-accent/15 items-center justify-center">
@@ -265,37 +312,52 @@ const Settings = () => {
                     System & Account
                 </Text>
                 <View className="gap-2.5">
+                    {/* Wipe All Stored Data */}
                     <AnimatedPressable
                         scaleTo={0.98}
                         onPress={handleClearData}
-                        containerClassName="bg-card border border-destructive/25 p-3.5 rounded-2xl flex-row items-center justify-between shadow-xs"
+                        containerClassName="bg-card border border-destructive/25 p-3.5 rounded-2xl shadow-xs active:opacity-75"
                     >
-                        <View className="flex-row items-center gap-2.5">
-                            <View className="size-8 rounded-xl bg-destructive/15 items-center justify-center">
-                                <Feather name="trash-2" size={14} color="#dc2626" />
+                        <View
+                            style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}
+                            className="flex-row items-center justify-between w-full"
+                        >
+                            <View
+                                style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}
+                                className="flex-row items-center gap-3 flex-1 min-w-0"
+                            >
+                                <View className="size-9 rounded-xl bg-destructive/15 items-center justify-center shrink-0">
+                                    <Feather name="trash-2" size={16} color="#dc2626" />
+                                </View>
+                                <View className="flex-1 min-w-0">
+                                    <Text className="text-xs font-sans-bold text-destructive" numberOfLines={1}>
+                                        Wipe All Stored Data
+                                    </Text>
+                                    <Text className="text-[10px] font-sans-medium text-muted-foreground mt-0.5" numberOfLines={1}>
+                                        Clear local database
+                                    </Text>
+                                </View>
                             </View>
-                            <View>
-                                <Text className="text-xs font-sans-bold text-destructive">Wipe All Stored Data</Text>
-                                <Text className="text-[10px] font-sans-medium text-muted-foreground">Clear local database</Text>
-                            </View>
+                            <Feather name="chevron-right" size={16} color="#dc2626" className="shrink-0" />
                         </View>
-                        <Feather name="chevron-right" size={16} color="#dc2626" />
                     </AnimatedPressable>
 
+                    {/* Sign Out of Recurrly */}
                     <AnimatedPressable
                         scaleTo={0.98}
                         onPress={handleSignOut}
-                        containerClassName="bg-destructive p-3.5 rounded-2xl flex-row items-center justify-center gap-2 shadow-xs"
+                        containerClassName="bg-destructive p-3.5 rounded-2xl shadow-xs active:opacity-85"
                     >
-                        <Feather name="log-out" size={15} color="#ffffff" />
-                        <Text className="text-xs font-sans-bold text-white">Sign Out of Recurrly</Text>
+                        <View
+                            style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, width: '100%' }}
+                            className="flex-row items-center justify-center gap-2 w-full"
+                        >
+                            <Feather name="log-out" size={16} color="#ffffff" />
+                            <Text className="text-xs font-sans-bold text-white">
+                                Sign Out of Recurrly
+                            </Text>
+                        </View>
                     </AnimatedPressable>
-
-                    <View className="items-center py-2">
-                        <Text className="text-[11px] font-sans-semibold text-muted-foreground">
-                            Recurrly App • v1.0.0 (Local Vault Edition)
-                        </Text>
-                    </View>
                 </View>
             </ScrollView>
         </SafeAreaView>

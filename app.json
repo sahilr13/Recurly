@@ -20,7 +20,11 @@
       },
       "permissions": [
         "POST_NOTIFICATIONS",
-        "SCHEDULE_EXACT_ALARM"
+        "SCHEDULE_EXACT_ALARM",
+        "READ_SMS",
+        "POST_NOTIFICATIONS",
+        "SCHEDULE_EXACT_ALARM",
+        "READ_SMS"
       ],
       "predictiveBackGestureEnabled": false
     },
@@ -64,7 +68,9 @@
         "expo-build-properties",
         {
           "android": {
-            "buildArchs": ["arm64-v8a"]
+            "buildArchs": [
+              "arm64-v8a"
+            ]
           }
         }
       ]
@@ -77,6 +83,12 @@
       "eas": {
         "projectId": "a12f58d6-ef3f-491b-99dd-9c19852567c9"
       }
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/a12f58d6-ef3f-491b-99dd-9c19852567c9"
     }
   }
 }
