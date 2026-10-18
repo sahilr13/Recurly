@@ -1,4 +1,4 @@
-import { Text, View, TextInput, FlatList, Pressable, LayoutAnimation } from 'react-native';
+import { Text, View, TextInput, FlatList, Pressable, LayoutAnimation, Alert } from 'react-native';
 import { SafeAreaView as RNSafeAreaView } from "react-native-safe-area-context";
 import { styled } from "nativewind";
 import { useState } from "react";
@@ -8,6 +8,7 @@ import CreateSubscriptionModal from "../../components/CreateSubscriptionModal";
 import AnimatedPressable from "../../components/AnimatedPressable";
 import { useSubscriptionStore } from "../../lib/subscriptionStore";
 import { importStatementFlow } from "../../lib/importFlow";
+import { syncHistoricalBankSms } from "../../lib/smsSync";
 
 const SafeAreaView = styled(RNSafeAreaView);
 
@@ -19,6 +20,7 @@ const Subscriptions = () => {
     const [expandedId, setExpandedId] = useState<string | null>(null);
     const [editingSub, setEditingSub] = useState<Subscription | null>(null);
     const [isEditModalVisible, setIsEditModalVisible] = useState(false);
+    const [isSyncingSms, setIsSyncingSms] = useState(false);
 
     const { subscriptions, updateSubscription } = useSubscriptionStore();
 
@@ -32,6 +34,25 @@ const Subscriptions = () => {
         updateSubscription(updated.id, updated);
         setEditingSub(null);
         setIsEditModalVisible(false);
+    };
+
+    const handleSyncSms = async () => {
+        setIsSyncingSms(true);
+        try {
+            const res = await syncHistoricalBankSms(90);
+            if (res.error) {
+                Alert.alert('SMS Sync', res.error);
+            } else {
+                Alert.alert(
+                    'SMS Sync Complete',
+                    `Parsed ${res.count} bank transactions from your inbox. Recurring charges have been added to your ledger.`
+                );
+            }
+        } catch (e) {
+            Alert.alert('Error', 'Could not read SMS alerts on this device.');
+        } finally {
+            setIsSyncingSms(false);
+        }
     };
 
     const activeCount = subscriptions.filter((s) => s.status === 'active').length;
@@ -60,14 +81,28 @@ const Subscriptions = () => {
                             <Text className="text-2xl font-sans-bold text-primary shrink-1" numberOfLines={1}>
                                 Subscriptions
                             </Text>
-                            <AnimatedPressable
-                                scaleTo={0.92}
-                                onPress={importStatementFlow}
-                                containerClassName="bg-card border border-border px-3.5 py-2 rounded-2xl flex-row items-center gap-1.5 shadow-xs shrink-0"
-                            >
-                                <Feather name="upload" size={13} color="#081126" />
-                                <Text className="text-xs font-sans-bold text-primary">Import Statement</Text>
-                            </AnimatedPressable>
+                            <View className="flex-row items-center gap-1.5 shrink-0">
+                                <AnimatedPressable
+                                    scaleTo={0.92}
+                                    onPress={handleSyncSms}
+                                    disabled={isSyncingSms}
+                                    containerClassName="bg-primary/10 border border-primary/20 px-3 py-2 rounded-2xl flex-row items-center gap-1.5 shadow-xs"
+                                >
+                                    <Feather name="message-square" size={13} color="#208AEF" />
+                                    <Text className="text-xs font-sans-bold text-primary">
+                                        {isSyncingSms ? 'Syncing...' : 'Sync SMS'}
+                                    </Text>
+                                </AnimatedPressable>
+
+                                <AnimatedPressable
+                                    scaleTo={0.92}
+                                    onPress={importStatementFlow}
+                                    containerClassName="bg-card border border-border px-3 py-2 rounded-2xl flex-row items-center gap-1.5 shadow-xs"
+                                >
+                                    <Feather name="upload" size={13} color="#081126" />
+                                    <Text className="text-xs font-sans-bold text-primary">CSV</Text>
+                                </AnimatedPressable>
+                            </View>
                         </View>
 
                         {/* Search Bar */}
@@ -87,7 +122,7 @@ const Subscriptions = () => {
                             )}
                         </View>
 
-                        {/* Responsive Full-Width Segmented Tab Bar */}
+                        {/* Segmented Tab Bar */}
                         <View className="flex-row bg-card rounded-2xl p-1 border border-border shadow-xs">
                             <Pressable
                                 onPress={() => handleTabChange('all')}

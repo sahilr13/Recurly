@@ -9,6 +9,7 @@ import { useSubscriptionStore } from '../../lib/subscriptionStore';
 import { formatCurrency } from '../../lib/utils';
 import AnimatedPressable from '../../components/AnimatedPressable';
 import { importStatementFlow } from '../../lib/importFlow';
+import { syncHistoricalBankSms } from '../../lib/smsSync';
 import { computeBankMetrics, TIERS } from '../../lib/analytics';
 import { CATEGORY_COLORS, SPEND_COLORS } from '../../lib/categories';
 import { cycleMonths, dueBetween, isBill, monthlyCost, nextDue, cyclePriceINR } from '../../lib/subMath';
@@ -18,22 +19,45 @@ const SafeAreaView = styled(RNSafeAreaView);
 type MainTab = 'subscriptions' | 'bank_health';
 
 const inr = (n: number) => formatCurrency(n, 'INR');
-
-// Benchmark annual subscription discount rate (e.g., YouTube Premium / typical streaming services: ~16.7% off)
-const ANNUAL_DISCOUNT_RATE = 0.167;
+const ANNUAL_DISCOUNT_RATE = 0.167; // 16.7% benchmark discount
 
 const Insights = () => {
   const router = useRouter();
   const { subscriptions, statementSummary, myNames, addMyName, removeMyName } = useSubscriptionStore();
-  const [activeTab, setActiveTab] = useState<MainTab>('subscriptions');
+  const [userTab, setUserTab] = useState<MainTab | null>(null);
   const [period, setPeriod] = useState<'monthly' | 'yearly'>('monthly');
   const [spendView, setSpendView] = useState<'merchants' | 'people'>('merchants');
   const [nameInput, setNameInput] = useState('');
   const [selectedDay, setSelectedDay] = useState(0);
+  const [isSyncingSms, setIsSyncingSms] = useState(false);
+
+  const hasBankData = !!statementSummary?.transactions?.length;
+  // Until the user picks a tab, show Bank Health if there is statement data but no subscriptions.
+  // Derived (not initial state) because the persisted store hydrates asynchronously.
+  const activeTab: MainTab = userTab ?? (hasBankData && subscriptions.length === 0 ? 'bank_health' : 'subscriptions');
 
   const handleTabSwitch = (tab: MainTab) => {
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-    setActiveTab(tab);
+    setUserTab(tab);
+  };
+
+  const handleSyncSms = async () => {
+    setIsSyncingSms(true);
+    try {
+      const res = await syncHistoricalBankSms(90);
+      if (res.error) {
+        Alert.alert('SMS Sync', res.error);
+      } else {
+        Alert.alert(
+          'Bank Health Updated',
+          `Parsed ${res.count} transactions from SMS. Health score, daily burn, and cash flow are updated.`
+        );
+      }
+    } catch (e) {
+      Alert.alert('Error', 'Could not read SMS on device.');
+    } finally {
+      setIsSyncingSms(false);
+    }
   };
 
   // ---------------- 1. Subscriptions & bills ----------------
@@ -51,7 +75,6 @@ const Insights = () => {
     const today = dayjs().startOf('day');
     const dueNext7 = dueBetween(active, today, today.add(7, 'day'));
 
-    // Annual-plan savings apply to monthly-billed, non-bill services in standard categories
     const canSave = subs.filter((s) => cycleMonths(s) === 1 && (s.category || 'Other') !== 'Other');
     const annualSavings = canSave.reduce((t, s) => t + monthlyCost(s), 0) * ANNUAL_DISCOUNT_RATE * 12;
 
@@ -69,7 +92,6 @@ const Insights = () => {
       }))
       .sort((a, b) => b.amount - a.amount);
 
-    // Rolling 7 days starting today (matches "due in next 7 days")
     const week = Array.from({ length: 7 }, (_, i) => {
       const day = today.add(i, 'day');
       const amount = active.reduce((t, s) => {
@@ -163,12 +185,24 @@ const Insights = () => {
             <Feather name="arrow-left" size={18} color="#081126" />
           </Pressable>
           <Text className="text-xl font-sans-bold text-primary shrink-1 px-2" numberOfLines={1}>Financial Insights</Text>
-          <Pressable
-            onPress={importStatementFlow}
-            className="size-11 rounded-2xl border border-border bg-card items-center justify-center active:opacity-70 shadow-xs shrink-0"
-          >
-            <Feather name="upload" size={16} color="#081126" />
-          </Pressable>
+          
+          <View className="flex-row items-center gap-1.5 shrink-0">
+            <AnimatedPressable
+              scaleTo={0.92}
+              onPress={handleSyncSms}
+              disabled={isSyncingSms}
+              containerClassName="size-11 rounded-2xl border border-primary/20 bg-primary/10 items-center justify-center active:opacity-70 shadow-xs"
+            >
+              <Feather name="message-square" size={16} color="#208AEF" />
+            </AnimatedPressable>
+
+            <Pressable
+              onPress={importStatementFlow}
+              className="size-11 rounded-2xl border border-border bg-card items-center justify-center active:opacity-70 shadow-xs"
+            >
+              <Feather name="upload" size={16} color="#081126" />
+            </Pressable>
+          </View>
         </View>
 
         <View className="flex-row bg-card rounded-2xl p-1 border border-border mb-5 shadow-xs">
@@ -179,6 +213,22 @@ const Insights = () => {
         {/* ===================== TAB 1 ===================== */}
         {activeTab === 'subscriptions' && (
           <View>
+            {subscriptions.length === 0 && (
+              <View className="bg-card rounded-2xl p-4 border border-border mb-5 shadow-xs">
+                <Text className="text-xs font-sans-bold text-primary">No recurring payments detected yet</Text>
+                <Text className="text-[11px] font-sans-medium text-muted-foreground mt-1 leading-4">
+                  {hasBankData
+                    ? 'Your bank data is analysed separately. Open the Bank Health tab to see it.'
+                    : 'Sync SMS or import a statement to get started.'}
+                </Text>
+                {hasBankData && (
+                  <Pressable onPress={() => handleTabSwitch('bank_health')} className="mt-3 self-start bg-primary px-3.5 py-2 rounded-xl active:opacity-80">
+                    <Text className="text-xs font-sans-bold text-white">View Bank Health</Text>
+                  </Pressable>
+                )}
+              </View>
+            )}
+
             <View className="bg-primary rounded-3xl p-5 mb-5 shadow-sm">
               <View className="flex-row items-center justify-between mb-2">
                 <Text className="text-xs font-sans-semibold text-white/70 uppercase tracking-wider">
@@ -291,40 +341,6 @@ const Insights = () => {
                 </View>
               )}
             </View>
-
-            <View className="mb-4">
-              <Text className="text-base font-sans-bold text-primary mb-3">Next 7 Days</Text>
-              <View className="rounded-3xl bg-[#f8edd1] border border-black/5 p-4 shadow-xs">
-                {sub.weekMax === 0 ? (
-                  <View className="h-36 items-center justify-center">
-                    <Feather name="check-circle" size={20} color="#16a34a" />
-                    <Text className="text-xs font-sans-medium text-muted-foreground mt-2">Nothing due in the next 7 days.</Text>
-                  </View>
-                ) : (
-                  <View className="h-36 flex-row items-end">
-                    {sub.week.map((item, idx) => {
-                      const has = item.amount > 0;
-                      const selected = selectedDay === idx;
-                      const h = has ? Math.max(10, Math.min((item.amount / (sub.weekMax * 1.3)) * 100, 100)) : 0;
-                      return (
-                        <Pressable key={idx} onPress={() => setSelectedDay(idx)} className="flex-1 items-center justify-end h-full">
-                          {selected && has && (
-                            <View className="bg-white px-2 py-0.5 rounded-lg border border-black/5 mb-1 z-10">
-                              <Text className="text-[10px] font-sans-bold text-accent" numberOfLines={1}>{inr(item.amount)}</Text>
-                            </View>
-                          )}
-                          <View
-                            style={{ height: has ? `${h}%` : 5 }}
-                            className={`w-3 rounded-full ${selected && has ? 'bg-accent' : has ? 'bg-primary' : 'bg-black/15'}`}
-                          />
-                          <Text className={`text-xs mt-2 ${selected ? 'font-sans-bold text-accent' : 'font-sans-medium text-muted-foreground'}`}>{item.label}</Text>
-                        </Pressable>
-                      );
-                    })}
-                  </View>
-                )}
-              </View>
-            </View>
           </View>
         )}
 
@@ -337,17 +353,32 @@ const Insights = () => {
                   <Feather name="file-text" size={28} color="#ea7a53" />
                 </View>
                 <Text className="text-lg font-sans-bold text-primary text-center">
-                  {needsReimport ? 'Re-import your statement' : 'No Statement Analyzed Yet'}
+                  {needsReimport ? 'Re-sync Bank Data' : 'No Financial Data Analyzed Yet'}
                 </Text>
                 <Text className="text-xs font-sans-medium text-muted-foreground text-center mt-2 mb-6 px-3 leading-5">
-                  {needsReimport
-                    ? 'Bank Health got a big upgrade (monthly trends, categories, own-account detection). Import the same file again to unlock it.'
-                    : 'Import your bank statement CSV to see your health score, cash flow, spending categories and top payees. Everything stays on this device.'}
+                  Scan your transaction SMS alerts or import a statement CSV to calculate your health score, cash flow, and top payees completely on-device.
                 </Text>
-                <AnimatedPressable onPress={importStatementFlow} containerClassName="bg-primary px-5 py-3 rounded-2xl flex-row items-center gap-2 shadow-xs">
-                  <Feather name="upload" size={15} color="#ffffff" />
-                  <Text className="text-xs font-sans-bold text-white">Import Statement</Text>
-                </AnimatedPressable>
+                
+                <View className="flex-row gap-3 w-full justify-center">
+                  <AnimatedPressable
+                    onPress={handleSyncSms}
+                    disabled={isSyncingSms}
+                    containerClassName="bg-primary/10 border border-primary/20 px-4 py-3 rounded-2xl flex-row items-center gap-2 shadow-xs"
+                  >
+                    <Feather name="message-square" size={15} color="#208AEF" />
+                    <Text className="text-xs font-sans-bold text-primary">
+                      {isSyncingSms ? 'Syncing...' : 'Sync Bank SMS'}
+                    </Text>
+                  </AnimatedPressable>
+
+                  <AnimatedPressable
+                    onPress={importStatementFlow}
+                    containerClassName="bg-primary px-4 py-3 rounded-2xl flex-row items-center gap-2 shadow-xs"
+                  >
+                    <Feather name="upload" size={15} color="#ffffff" />
+                    <Text className="text-xs font-sans-bold text-white">Import CSV</Text>
+                  </AnimatedPressable>
+                </View>
               </View>
             ) : (
               <View>
@@ -361,7 +392,7 @@ const Insights = () => {
                   </View>
                 </View>
 
-                {/* Score */}
+                {/* Financial Health Score */}
                 <View className="bg-card rounded-3xl p-5 border border-border mb-4 shadow-xs">
                   <View className="flex-row items-center justify-between mb-2">
                     <Text className="text-xs font-sans-semibold text-muted-foreground uppercase tracking-wider">Financial Health Score</Text>
@@ -389,9 +420,6 @@ const Insights = () => {
                       {bank.savingsRate >= 0 ? '+' : ''}{bank.savingsRate.toFixed(1)}%
                     </Text>
                   </View>
-                  <Text className="text-[10px] font-sans-medium text-muted-foreground mt-2 leading-4">
-                    Based on income kept, fixed commitments vs income, and average balance. A personal guide, not a credit score.
-                  </Text>
                 </View>
 
                 {/* Cash flow */}
@@ -422,48 +450,9 @@ const Insights = () => {
                       {bank.net >= 0 ? '+' : '-'}{inr(Math.abs(bank.net))}
                     </Text>
                   </View>
-                  {bank.selfCount > 0 && (
-                    <Text className="text-[10px] font-sans-medium text-white/50 mt-2">
-                      Excludes {inr(bank.selfOut)} out / {inr(bank.selfIn)} in between your own accounts.
-                    </Text>
-                  )}
                 </View>
 
-                {/* Monthly trend */}
-                {bank.monthly.length > 1 && (
-                  <View className="mb-5">
-                    <Text className="text-base font-sans-bold text-primary mb-3">Monthly Trend</Text>
-                    <View className="bg-card rounded-3xl p-4 border border-border shadow-xs">
-                      <View className="h-28 flex-row items-end">
-                        {(() => {
-                          const max = Math.max(...bank.monthly.flatMap((m) => [m.income, m.spend]), 1);
-                          return bank.monthly.map((m) => (
-                            <View key={m.key} className="flex-1 items-center justify-end h-full">
-                              <View className="flex-row items-end gap-1 h-full">
-                                <View style={{ height: `${Math.max((m.income / max) * 100, 2)}%` }} className="w-3 rounded-t-md bg-[#16a34a]" />
-                                <View style={{ height: `${Math.max((m.spend / max) * 100, 2)}%` }} className="w-3 rounded-t-md bg-accent" />
-                              </View>
-                            </View>
-                          ));
-                        })()}
-                      </View>
-                      <View className="flex-row mt-2">
-                        {bank.monthly.map((m) => (
-                          <Text key={m.key} className="flex-1 text-center text-[10px] font-sans-bold text-muted-foreground">
-                            {m.label}{m.partial ? '*' : ''}
-                          </Text>
-                        ))}
-                      </View>
-                      <View className="flex-row items-center gap-4 mt-3">
-                        <View className="flex-row items-center gap-1.5"><View className="size-2 rounded-full bg-[#16a34a]" /><Text className="text-[10px] font-sans-medium text-muted-foreground">Income</Text></View>
-                        <View className="flex-row items-center gap-1.5"><View className="size-2 rounded-full bg-accent" /><Text className="text-[10px] font-sans-medium text-muted-foreground">Spending</Text></View>
-                        <Text className="text-[10px] font-sans-medium text-muted-foreground">* partial month</Text>
-                      </View>
-                    </View>
-                  </View>
-                )}
-
-                {/* Vitals */}
+                {/* Key Vitals */}
                 <Text className="text-base font-sans-bold text-primary mb-3">Key Vitals</Text>
                 <View className="flex-row gap-2.5 mb-2.5">
                   {[
@@ -493,44 +482,8 @@ const Insights = () => {
                     </View>
                   ))}
                 </View>
-                {bank.avgBalance !== null && bank.minBalance !== null && (
-                  <View className="bg-card rounded-2xl p-3.5 border border-border shadow-xs mb-5 flex-row justify-between">
-                    <View>
-                      <Text className="text-[10px] font-sans-bold text-muted-foreground uppercase">Avg balance</Text>
-                      <Text className="text-sm font-sans-extrabold text-primary mt-0.5">{inr(bank.avgBalance)}</Text>
-                    </View>
-                    <View className="items-end">
-                      <Text className="text-[10px] font-sans-bold text-muted-foreground uppercase">Lowest balance</Text>
-                      <Text className="text-sm font-sans-extrabold text-primary mt-0.5">{inr(bank.minBalance)}</Text>
-                    </View>
-                  </View>
-                )}
 
-                {/* Spending categories */}
-                {bank.categories.length > 0 && (
-                  <View className="mb-5">
-                    <Text className="text-base font-sans-bold text-primary mb-3">Where Money Goes</Text>
-                    <View className="bg-card rounded-3xl p-4 border border-border gap-3 shadow-xs">
-                      {bank.categories.slice(0, 7).map((c) => (
-                        <View key={c.name} className="gap-1.5">
-                          <View className="flex-row items-center justify-between">
-                            <View className="flex-row items-center gap-2 flex-1 pr-2">
-                              <View style={{ backgroundColor: SPEND_COLORS[c.name] || '#d4d4d4' }} className="size-2 rounded-full" />
-                              <Text className="text-xs font-sans-semibold text-primary" numberOfLines={1}>{c.name}</Text>
-                              <Text className="text-[10px] font-sans-bold text-muted-foreground">({c.pct.toFixed(0)}%)</Text>
-                            </View>
-                            <Text className="text-xs font-sans-bold text-primary">{inr(c.amount)}</Text>
-                          </View>
-                          <View className="h-1.5 w-full bg-black/5 rounded-full overflow-hidden">
-                            <View style={{ width: `${Math.max(c.pct, 2)}%`, backgroundColor: SPEND_COLORS[c.name] || '#d4d4d4' }} className="h-full rounded-full" />
-                          </View>
-                        </View>
-                      ))}
-                    </View>
-                  </View>
-                )}
-
-                {/* Top outflow */}
+                {/* Top Outflow */}
                 <View className="mb-5">
                   <View className="flex-row items-center justify-between mb-3">
                     <Text className="text-base font-sans-bold text-primary">Top Outflow</Text>
@@ -564,15 +517,14 @@ const Insights = () => {
                         </View>
                       </Pressable>
                     ))}
-                    <Text className="text-[10px] font-sans-medium text-muted-foreground">Tap a name to mark it as your own account.</Text>
                   </View>
                 </View>
 
-                {/* Own accounts */}
+                {/* Own Accounts */}
                 <View className="mb-5">
                   <Text className="text-base font-sans-bold text-primary mb-1">My Own Accounts</Text>
                   <Text className="text-[11px] font-sans-medium text-muted-foreground mb-3 leading-4">
-                    Transfers to/from these names are ignored so they don't inflate income or spending. Short names like "sahil" match anywhere in the payee.
+                    Transfers to/from these names are excluded from total spend.
                   </Text>
                   <View className="bg-card rounded-3xl p-4 border border-border gap-3 shadow-xs">
                     <View className="flex-row flex-wrap gap-1.5">
@@ -618,13 +570,26 @@ const Insights = () => {
                   })}
                 </View>
 
-                <AnimatedPressable
-                  onPress={importStatementFlow}
-                  containerClassName="bg-white/60 border border-border py-3 rounded-2xl items-center flex-row justify-center gap-1.5 active:opacity-70 shadow-xs mb-4"
-                >
-                  <Feather name="refresh-cw" size={13} color="#081126" />
-                  <Text className="text-xs font-sans-bold text-primary">Update with New Statement</Text>
-                </AnimatedPressable>
+                <View className="flex-row gap-2.5 mb-4">
+                  <AnimatedPressable
+                    onPress={handleSyncSms}
+                    disabled={isSyncingSms}
+                    containerClassName="flex-1 bg-primary/10 border border-primary/20 py-3 rounded-2xl items-center flex-row justify-center gap-1.5 active:opacity-70 shadow-xs"
+                  >
+                    <Feather name="message-square" size={13} color="#208AEF" />
+                    <Text className="text-xs font-sans-bold text-primary">
+                      {isSyncingSms ? 'Syncing...' : 'Sync SMS'}
+                    </Text>
+                  </AnimatedPressable>
+
+                  <AnimatedPressable
+                    onPress={importStatementFlow}
+                    containerClassName="flex-1 bg-white/60 border border-border py-3 rounded-2xl items-center flex-row justify-center gap-1.5 active:opacity-70 shadow-xs"
+                  >
+                    <Feather name="refresh-cw" size={13} color="#081126" />
+                    <Text className="text-xs font-sans-bold text-primary">New Statement</Text>
+                  </AnimatedPressable>
+                </View>
               </View>
             )}
           </View>
